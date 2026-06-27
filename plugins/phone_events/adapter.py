@@ -11,7 +11,6 @@ untrusted data, never as instructions.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import threading
@@ -123,12 +122,12 @@ class PhoneEventAdapter:
             if decision.is_ignore:
                 logger.debug(
                     "policy: ignoring %s from %s (%s)",
-                    event.event_type, event.package, decision.summary,
+                    event.event_type, event.package, decision.notes,
                 )
                 return
             event.meta["_policy_behavior"] = decision.behavior
-            if decision.summary:
-                event.meta["_policy_summary"] = decision.summary
+            if decision.notes:
+                event.meta["_policy_summary"] = decision.notes
 
         from .redact import (
             redact_sensitive,

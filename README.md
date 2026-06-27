@@ -28,6 +28,19 @@ hermes plugins install yourname/hermes-phone-agent/plugins/phone_events
 ./setup.sh
 ```
 
+## Policy
+
+The agent's autonomy is controlled by `phone-policy.yaml` — a config file that defines what the agent can do on its own vs. what requires your approval. See [POLICY.md](POLICY.md) for the full reference and examples.
+
+```bash
+# Copy the default policy
+cp phone-policy.yaml ~/.hermes/phone-policy.yaml
+
+# Edit to match your preferences — changes take effect immediately
+```
+
+You can also ask any AI assistant to generate a config for you using the prompt template in POLICY.md.
+
 ## Security
 
 See [SECURITY.md](SECURITY.md) for the full threat model and mitigations.
@@ -35,7 +48,8 @@ See [SECURITY.md](SECURITY.md) for the full threat model and mitigations.
 Key points:
 - All ADB commands use argument-list subprocess calls — no shell injection possible
 - Phone content (notifications, UI text) is treated as untrusted data, never as instructions
-- Dangerous actions require explicit user approval
+- Policy engine enforces per-app action restrictions (e.g., finance apps are read-only)
+- Dangerous actions (`install_apk`, `shell`) always require explicit user approval
 - Helper APK socket uses per-session authentication tokens
 - Configurable event filtering and sensitive data redaction
 

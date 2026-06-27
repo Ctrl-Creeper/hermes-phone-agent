@@ -26,7 +26,6 @@ from .backend import (
     UIElement,
 )
 from .sanitize import (
-    sanitize_shell_arg,
     validate_activity_name,
     validate_apk_path,
     validate_coordinate,
@@ -345,7 +344,7 @@ class AdbBackend(PhoneBackend):
         if element is not None:
             self.tap(element=element)
             time.sleep(0.3)
-        escaped = text.replace(" ", "%s")
+        escaped = text.replace("%", "%%").replace(" ", "%s")
         result = self._adb_shell("input", "text", escaped)
         ok = result.returncode == 0
         return ActionResult(ok=ok, action="type",
@@ -355,7 +354,16 @@ class AdbBackend(PhoneBackend):
         if element is not None:
             self.tap(element=element)
             time.sleep(0.3)
-        self._adb_shell("input", "keyevent", "KEYCODE_CTRL_LEFT", "KEYCODE_A")
+        # Select all (Ctrl+A) then delete. keycombination requires API 28+
+        # (our minSdk is 26, but most emulators are 28+).
+        r = self._adb_shell("input", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_A")
+        if r.returncode != 0:
+            # Fallback for API 26-27: triple-tap to select all
+            self._adb_shell("input", "keyevent", "KEYCODE_MOVE_HOME")
+            self._adb_shell(
+                "input", "swipe", "0", "0", "0", "0", "3000",
+            )
+        time.sleep(0.1)
         self._adb_shell("input", "keyevent", "KEYCODE_DEL")
         return ActionResult(ok=True, action="clear_text", message="cleared field")
 

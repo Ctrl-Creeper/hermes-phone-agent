@@ -17,7 +17,7 @@ from .backend import (
     PhoneBackend,
     UIElement,
 )
-from .policy import get_policy, BEHAVIOR_AUTO
+from .policy import get_policy
 
 logger = logging.getLogger(__name__)
 

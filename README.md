@@ -20,9 +20,15 @@ Android helper APK that let Hermes control and react to a virtual Android phone.
 ## Install
 
 ```bash
-# Install both plugins
-hermes plugins install yourname/hermes-phone-agent/plugins/phone_use
-hermes plugins install yourname/hermes-phone-agent/plugins/phone_events
+
+# Install both Hermes plugins
+hermes plugins install Ctrl-Creeper/virtual-phone-agent/plugins/phone_use 
+hermes plugins install Ctrl-Creeper/virtual-phone-agent/plugins/phone_events
+
+# Install helper APK on a running Android emulator and grant permissions
+git clone https://github.com/Ctrl-Creeper/virtual-phone-agent.git
+cd virtual-phone-agent
+./setup.sh
 
 # Install helper APK on running emulator and grant permissions
 ./setup.sh

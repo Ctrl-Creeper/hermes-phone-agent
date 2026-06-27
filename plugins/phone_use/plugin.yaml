@@ -1,6 +1,6 @@
 name: phone-use
 label: Phone Control (ADB)
-kind: tool
+kind: standalone
 version: 0.1.0
 description: >
   Control a virtual Android phone via ADB — screenshots, tap, swipe,

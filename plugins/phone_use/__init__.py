@@ -4,8 +4,8 @@ Registers the `phone_use` tool into the `phone_use` toolset.
 Install: hermes plugins install <repo>/plugins/phone_use
 """
 
-from plugins.phone_use.schema import PHONE_USE_SCHEMA
-from plugins.phone_use.tool import (
+from .schema import PHONE_USE_SCHEMA
+from .tool import (
     check_phone_use_requirements,
     handle_phone_use,
     set_approval_callback,

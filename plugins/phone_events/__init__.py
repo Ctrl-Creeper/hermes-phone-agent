@@ -6,7 +6,7 @@ UI changes, crashes) and injects them into the Hermes conversation loop.
 Install: hermes plugins install <repo>/plugins/phone_events
 """
 
-from plugins.phone_events.adapter import (
+from .adapter import (
     PhoneEventAdapter,
     check_phone_events_requirements,
 )

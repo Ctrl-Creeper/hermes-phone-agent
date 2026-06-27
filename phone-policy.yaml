@@ -1,0 +1,248 @@
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║               Phone Agent Policy Configuration                  ║
+# ║                                                                  ║
+# ║  This file controls what the agent can do autonomously and       ║
+# ║  what requires your explicit approval. It is the hard boundary   ║
+# ║  between the AI and your phone — the agent CANNOT override it.   ║
+# ╚══════════════════════════════════════════════════════════════════╝
+#
+# Location (searched in order, first found wins):
+#   $PHONE_POLICY_PATH                 env var override
+#   ./.hermes/phone-policy.yaml        project-local
+#   ~/.hermes/phone-policy.yaml        user-global
+#
+# Hot-reloaded: changes take effect without restarting hermes.
+#
+# ── Schema Reference ─────────────────────────────────────────────
+#
+# default_behavior: auto | report | ignore
+#   What happens when no rule matches an event.
+#
+# global_restrict: [action, ...]
+#   Actions blocked everywhere, even in "auto" rules.
+#   These ALWAYS require explicit human approval.
+#
+# app_profiles:
+#   Named profiles that define how the agent treats a category of apps.
+#   Each profile has:
+#     packages: [package.name, ...]   — apps in this profile
+#     on_event: auto | report | ignore — what to do when an event arrives
+#     allowed_actions: [action, ...]   — whitelist (if set, only these are allowed)
+#     blocked_actions: [action, ...]   — blacklist (these are always denied)
+#     notes: "..."                     — human-readable explanation for the agent
+#
+# event_rules:
+#   Fine-grained rules that match specific event patterns.
+#   Evaluated before app_profiles. Higher priority wins.
+#   Each rule has:
+#     match:
+#       event: notification | app_switch | crash | toast | ui_change | broadcast
+#       package: "exact.package" or "com.example.*" (glob)
+#       title_regex: "pattern"   — regex matched against event title
+#       body_regex: "pattern"    — regex matched against event body
+#     behavior: auto | report | ignore
+#     allowed_actions: [...]     — if auto, restrict to only these actions
+#     notes: "..."
+#     priority: 0                — higher = evaluated first (default: 0)
+#
+# ── Behavior Levels ──────────────────────────────────────────────
+#
+#   auto    The agent acts on its own. It will perform the allowed
+#           actions and report the result afterward. You see what
+#           happened, not what's about to happen.
+#
+#   report  The agent tells you what happened on the phone and waits
+#           for your instruction before touching anything. This is
+#           the safest option for anything you care about.
+#
+#   ignore  The event is silently dropped. The agent never sees it.
+#           Use this for noise (app switches, spam, OTPs that are
+#           already redacted).
+#
+# ── Available Actions ────────────────────────────────────────────
+#
+#   Read-only (safe):
+#     capture, wait, list_apps, current_app, device_info
+#
+#   Interactive (needs approval or auto-policy):
+#     tap, double_tap, long_press, swipe
+#     type, clear_text, set_text, keyevent
+#     launch_app, stop_app
+#
+#   Dangerous (globally restricted by default):
+#     install_apk, shell
+#
+# ═════════════════════════════════════════════════════════════════
+
+
+# ── Defaults ─────────────────────────────────────────────────────
+
+default_behavior: report
+
+global_restrict:
+  - install_apk
+  - shell
+
+
+# ── App Profiles ─────────────────────────────────────────────────
+# Group apps by trust level. The agent follows these as hard rules.
+
+app_profiles:
+
+  # Finance apps: read-only. The agent can look but never touch.
+  finance:
+    packages:
+      - com.eg.android.AlipayGphone          # Alipay
+      - com.tencent.mm.plugin.wallet          # WeChat Pay (plugin)
+      - com.android.vending                   # Google Play (purchases)
+      - com.paypal.android.p2pmobile          # PayPal
+      - com.venmo                             # Venmo
+    on_event: report
+    blocked_actions:
+      - tap
+      - double_tap
+      - long_press
+      - swipe
+      - type
+      - set_text
+      - clear_text
+      - keyevent
+      - launch_app
+      - stop_app
+    notes: >
+      Finance apps are read-only. Report what you see to the user
+      but NEVER interact with them. No tapping, no typing, no swiping.
+
+  # Messaging apps: report and wait for instructions.
+  messaging:
+    packages:
+      - com.tencent.mm                        # WeChat
+      - com.tencent.mobileqq                  # QQ
+      - org.telegram.messenger                # Telegram
+      - com.whatsapp                          # WhatsApp
+      - com.facebook.orca                     # Messenger
+      - com.discord                           # Discord
+      - jp.naver.line.android                 # LINE
+    on_event: report
+    blocked_actions: []
+    notes: >
+      Messaging apps — summarize notifications to the user and wait
+      for instructions before replying. Never send messages on your own.
+
+  # System apps: auto-handle, report result.
+  system:
+    packages:
+      - com.android.settings                  # Settings
+      - com.android.systemui                  # System UI
+      - com.android.launcher*                 # Launcher (glob)
+      - com.google.android.apps.nexuslauncher # Pixel Launcher
+    on_event: auto
+    allowed_actions:
+      - capture
+      - current_app
+      - device_info
+      - tap
+      - swipe
+      - keyevent
+    notes: >
+      System apps — safe to interact with for navigation and status checks.
+      Do not change system settings without user approval.
+
+  # Browser: report links, never auto-navigate.
+  browser:
+    packages:
+      - com.android.chrome
+      - org.mozilla.firefox
+      - com.brave.browser
+    on_event: report
+    blocked_actions:
+      - type
+      - set_text
+    notes: >
+      Browser — report what's on screen but don't type URLs or fill forms.
+      Typing in the browser risks navigating to attacker-controlled pages
+      via prompt injection in notification text.
+
+
+# ── Event Rules ──────────────────────────────────────────────────
+# Fine-grained rules matched before app_profiles. First match wins.
+
+event_rules:
+
+  # ── Priority 10: Payment / sensitive ───────────────────────
+
+  - match:
+      package: "com.tencent.mm"
+      event: notification
+      title_regex: "微信支付|WeChat Pay|转账|红包|付款|收款"
+    behavior: report
+    allowed_actions: [capture, device_info]
+    notes: "WeChat payment — report only, absolutely no interaction."
+    priority: 10
+
+  - match:
+      event: notification
+      title_regex: "payment|付款|转账|withdrawal|提现"
+    behavior: report
+    allowed_actions: [capture, device_info]
+    notes: "Payment-related notification — report only."
+    priority: 10
+
+  # ── Priority 5: OTP / verification ─────────────────────────
+
+  - match:
+      event: notification
+      title_regex: "验证码|OTP|verification code|인증번호|確認コード|码"
+    behavior: ignore
+    notes: >
+      OTP / verification code notifications are already redacted by the
+      security layer. Drop them so the agent doesn't even attempt to read
+      or relay partial codes.
+    priority: 5
+
+  - match:
+      event: notification
+      body_regex: "\\b\\d{4,6}\\b.*(?:验证|verify|code|码)"
+    behavior: ignore
+    notes: "Body contains what looks like a verification code — drop."
+    priority: 5
+
+  # ── Priority 3: Spam / ads ────────────────────────────────
+
+  - match:
+      event: notification
+      title_regex: "广告|推广|promotion|special offer|限时|活动|优惠|clearance|sale"
+    behavior: ignore
+    notes: "Likely spam or promotional notification — drop silently."
+    priority: 3
+
+  - match:
+      event: notification
+      body_regex: "unsubscribe|退订|点击领取|claim your|act now"
+    behavior: ignore
+    notes: "Promotional body text — drop."
+    priority: 3
+
+  # ── Priority 0: System events ──────────────────────────────
+
+  - match:
+      event: crash
+    behavior: auto
+    allowed_actions: [capture, current_app, device_info]
+    notes: "App crash — auto-capture screenshot and report to user."
+
+  - match:
+      event: app_switch
+    behavior: ignore
+    notes: "Routine app switch — noise, drop silently."
+
+  - match:
+      event: toast
+    behavior: auto
+    allowed_actions: [capture]
+    notes: "Toast message — capture and report, toasts disappear quickly."
+
+  - match:
+      event: broadcast
+    behavior: report
+    notes: "System broadcast — report to user for awareness."

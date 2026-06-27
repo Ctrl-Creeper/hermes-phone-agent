@@ -31,6 +31,16 @@ def _wrap_phone_data(text: str) -> str:
     return f"{_DATA_PREFIX} {text}"
 
 
+def _load_policy():
+    """Import policy engine from the phone_use plugin."""
+    try:
+        from hermes_plugins.phone_use.policy import get_policy
+        return get_policy()
+    except ImportError:
+        logger.debug("phone_use plugin not loaded — policy enforcement disabled")
+        return None
+
+
 def check_phone_events_requirements() -> bool:
     """Check if ADB is available (minimum requirement)."""
     import shutil
@@ -67,9 +77,9 @@ class PhoneEventAdapter:
 
     async def connect(self) -> bool:
         """Start event monitors."""
-        from plugins.phone_events.event_filter import EventFilter
-        from plugins.phone_events.logcat_monitor import LogcatMonitor
-        from plugins.phone_events.socket_listener import SocketListener
+        from .event_filter import EventFilter
+        from .logcat_monitor import LogcatMonitor
+        from .socket_listener import SocketListener
 
         self._event_filter = EventFilter.from_env()
 
@@ -97,11 +107,30 @@ class PhoneEventAdapter:
         return self._connected
 
     def _on_raw_event(self, event) -> None:
-        """Called from monitor threads. Filter, redact, then dispatch."""
+        """Called from monitor threads. Policy check → filter → redact → dispatch."""
         if not self._event_filter or not self._event_filter.should_forward(event):
             return
 
-        from plugins.phone_events.redact import (
+        # Policy enforcement: check behavior before processing.
+        policy = _load_policy()
+        if policy is not None:
+            decision = policy.evaluate_event(
+                package=event.package,
+                event_type=event.event_type,
+                title=event.title,
+                body=event.body,
+            )
+            if decision.is_ignore:
+                logger.debug(
+                    "policy: ignoring %s from %s (%s)",
+                    event.event_type, event.package, decision.summary,
+                )
+                return
+            event.meta["_policy_behavior"] = decision.behavior
+            if decision.summary:
+                event.meta["_policy_summary"] = decision.summary
+
+        from .redact import (
             redact_sensitive,
             truncate_notification_body,
         )
@@ -125,39 +154,52 @@ class PhoneEventAdapter:
 
         All content is wrapped with [PHONE_DATA] to clearly mark it as
         untrusted data from the phone, not user instructions.
+
+        The policy behavior tag tells the agent what it's allowed to do:
+          [AUTO] — act on your own, report result afterward
+          [REPORT] — summarize to the user, wait for instructions before acting
         """
+        behavior = event.meta.get("_policy_behavior", "report").upper()
+        policy_hint = event.meta.get("_policy_summary", "")
+        tag = f"[{behavior}]"
+
         if event.event_type == "notification":
-            parts = [f"📱 Phone notification from {event.package}"]
+            parts = [f"📱 {tag} Phone notification from {event.package}"]
             if event.title:
                 parts.append(f"  Title: {_wrap_phone_data(event.title)}")
             if event.body:
                 parts.append(f"  Body: {_wrap_phone_data(event.body)}")
+            if policy_hint:
+                parts.append(f"  Policy: {policy_hint}")
             return "\n".join(parts)
 
         if event.event_type == "app_switch":
             return (
-                f"📱 App switched to {event.package}"
+                f"📱 {tag} App switched to {event.package}"
                 + (f" ({_wrap_phone_data(event.title)})" if event.title else "")
             )
 
         if event.event_type == "crash":
-            return f"📱 App crashed: {event.package}"
+            parts = [f"📱 {tag} App crashed: {event.package}"]
+            if policy_hint:
+                parts.append(f"  Policy: {policy_hint}")
+            return "\n".join(parts)
 
         if event.event_type == "toast":
             return (
-                f"📱 Toast from {event.package}: "
+                f"📱 {tag} Toast from {event.package}: "
                 f"{_wrap_phone_data(event.body)}"
             )
 
         if event.event_type == "ui_change":
             return (
-                f"📱 UI changed in {event.package}: "
+                f"📱 {tag} UI changed in {event.package}: "
                 f"{_wrap_phone_data(event.body)}"
             )
 
         if event.event_type == "broadcast":
             return (
-                f"📱 System broadcast: {_wrap_phone_data(event.title)}"
+                f"📱 {tag} System broadcast: {_wrap_phone_data(event.title)}"
                 + (f" — {_wrap_phone_data(event.body)}" if event.body else "")
             )
 

@@ -18,14 +18,14 @@ import time
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional, Tuple
 
-from plugins.phone_use.backend import (
+from .backend import (
     ActionResult,
     CaptureResult,
     DeviceInfo,
     PhoneBackend,
     UIElement,
 )
-from plugins.phone_use.sanitize import (
+from .sanitize import (
     sanitize_shell_arg,
     validate_activity_name,
     validate_apk_path,

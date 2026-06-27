@@ -14,7 +14,7 @@ import threading
 import time
 from typing import Callable, Optional
 
-from plugins.phone_events.event_filter import PhoneEvent
+from .event_filter import PhoneEvent
 
 logger = logging.getLogger(__name__)
 

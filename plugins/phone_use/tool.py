@@ -11,12 +11,13 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 
-from plugins.phone_use.backend import (
+from .backend import (
     ActionResult,
     CaptureResult,
     PhoneBackend,
     UIElement,
 )
+from .policy import get_policy, BEHAVIOR_AUTO
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ def _get_backend() -> PhoneBackend:
                 "HERMES_PHONE_BACKEND", "adb"
             ).lower()
             if backend_name == "adb":
-                from plugins.phone_use.adb_backend import AdbBackend
+                from .adb_backend import AdbBackend
                 serial = os.environ.get("ANDROID_SERIAL")
                 _backend = AdbBackend(serial=serial)
             elif backend_name == "noop":
@@ -117,6 +118,26 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
             "error": f"phone backend unavailable: {e}",
             "hint": "Ensure adb is on PATH and an emulator is running.",
         })
+
+    # Policy enforcement: check if the action is allowed for the target package.
+    target_pkg = args.get("package", "")
+    if not target_pkg and action not in _SAFE_ACTIONS:
+        try:
+            fg = backend.current_app()
+            target_pkg = fg.get("package", "")
+        except Exception:
+            pass
+    if target_pkg:
+        policy = get_policy()
+        decision = policy.check_action(action, target_pkg)
+        if not decision.action_allowed(action):
+            return json.dumps({
+                "error": "blocked by phone policy",
+                "action": action,
+                "package": target_pkg,
+                "reason": decision.notes or f"policy restricts '{action}' on '{target_pkg}'",
+                "hint": "Edit phone-policy.yaml to change this rule.",
+            })
 
     try:
         return _dispatch(backend, action, args)
@@ -439,7 +460,7 @@ def _element_to_dict(e: UIElement) -> Dict[str, Any]:
 # ── Availability check ─────────────────────────────────────────────
 
 def check_phone_use_requirements() -> bool:
-    from plugins.phone_use.adb_backend import adb_available
+    from .adb_backend import adb_available
     return adb_available()
 
 
@@ -455,7 +476,7 @@ class _NoopBackend(PhoneBackend):
     def is_available(self): return True
 
     def device_info(self):
-        from plugins.phone_use.backend import DeviceInfo
+        from .backend import DeviceInfo
         return DeviceInfo(serial="noop", model="Noop", screen_width=1080,
                           screen_height=2400, is_emulator=True)
 

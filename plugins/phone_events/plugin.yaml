@@ -1,0 +1,32 @@
+name: phone-events
+label: Phone Events
+kind: platform
+version: 0.1.0
+description: >
+  Gateway platform adapter that listens to Android phone events
+  (notifications, app switches, UI changes) via ADB logcat and
+  an optional helper APK, then injects them as messages into the
+  Hermes conversation loop.
+author: hermes-phone-agent
+requires_env: []
+optional_env:
+  - name: PHONE_EVENTS_ENABLED
+    description: "Enable phone event monitoring (true/false, default: true)"
+    prompt: "Enable phone events?"
+    password: false
+  - name: PHONE_EVENTS_ALLOWED_PACKAGES
+    description: "Comma-separated package names to monitor (empty = all)"
+    prompt: "Packages to monitor (or empty for all)"
+    password: false
+  - name: PHONE_EVENTS_HELPER_PORT
+    description: "Port for helper APK socket (default: 18765)"
+    prompt: "Helper APK port"
+    password: false
+  - name: PHONE_EVENTS_RATE_LIMIT
+    description: "Max events per second (default: 2)"
+    prompt: "Rate limit (events/sec)"
+    password: false
+  - name: PHONE_EVENTS_REDACT_OTP
+    description: "Redact OTP/verification codes from notifications (default: true)"
+    prompt: "Redact OTPs?"
+    password: false

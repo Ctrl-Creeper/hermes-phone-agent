@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+Accessibility service configuration.
+
+SECURITY: We request only the event types we need and do NOT request
+canRetrieveWindowContent (we read structure, not arbitrary content).
+feedbackType is "generic" (no audio/haptic feedback — purely observational).
+-->
+<accessibility-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeNotificationStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canRetrieveWindowContent="false"
+    android:notificationTimeout="200"
+    android:description="@string/accessibility_description" />

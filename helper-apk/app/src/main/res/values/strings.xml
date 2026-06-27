@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hermes Phone Agent Helper</string>
+    <string name="accessibility_description">
+        Hermes Agent helper that observes UI changes and forwards them
+        to the host for AI-assisted phone automation. Only active when
+        an automation session is running.
+    </string>
+</resources>

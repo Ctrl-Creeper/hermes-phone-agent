@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.hermes.phoneagent">
+
+    <!--
+    SECURITY: Minimal permissions. We do NOT request:
+    - INTERNET (no network access — events go through local socket only)
+    - READ_CONTACTS, READ_SMS, READ_CALL_LOG (we observe via services, not direct DB)
+    - CAMERA, MICROPHONE, LOCATION (not needed)
+    -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <application
+        android:allowBackup="false"
+        android:label="Hermes Phone Agent Helper"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+        <!-- Notification Listener Service
+             Requires user/ADB grant: settings put secure
+             enabled_notification_listeners com.hermes.phoneagent/.PhoneNotificationListener -->
+        <service
+            android:name=".PhoneNotificationListener"
+            android:exported="false"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- Accessibility Service
+             Requires user/ADB grant: settings put secure
+             enabled_accessibility_services com.hermes.phoneagent/.PhoneAccessibilityService -->
+        <service
+            android:name=".PhoneAccessibilityService"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_config" />
+        </service>
+
+        <!-- Token receiver — receives session auth token from host via broadcast -->
+        <receiver
+            android:name=".TokenReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.hermes.phoneagent.SET_TOKEN" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Boot receiver — restarts services after reboot -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Event socket server (foreground service) -->
+        <service
+            android:name=".EventSocketService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+    </application>
+
+</manifest>

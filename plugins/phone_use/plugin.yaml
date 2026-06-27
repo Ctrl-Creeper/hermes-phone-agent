@@ -1,0 +1,20 @@
+name: phone-use
+label: Phone Control (ADB)
+kind: tool
+version: 0.1.0
+description: >
+  Control a virtual Android phone via ADB — screenshots, tap, swipe,
+  type text, press keys, launch/stop apps, read UI hierarchy. Works with
+  any tool-capable model. Requires adb on PATH and a connected
+  device/emulator.
+author: hermes-phone-agent
+requires_env: []
+optional_env:
+  - name: ANDROID_SERIAL
+    description: "ADB device serial (auto-detected if only one device connected)"
+    prompt: "Android device serial (or leave empty)"
+    password: false
+  - name: HERMES_PHONE_BACKEND
+    description: "Phone backend: 'adb' (default) or 'noop' (testing)"
+    prompt: "Phone backend"
+    password: false

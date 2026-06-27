@@ -32,6 +32,10 @@ cd virtual-phone-agent
 
 # Install helper APK on running emulator and grant permissions
 ./setup.sh
+
+# To enable them, simply use
+hermes plugins enable phone_use
+hermes plugins enable phone_events
 ```
 
 ## Policy

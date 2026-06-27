@@ -16,6 +16,7 @@ Android helper APK that let Hermes control and react to a virtual Android phone.
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) installed
 - Android SDK Platform Tools (`adb` on PATH)
 - An Android emulator running (Android Studio AVD or `emulator` CLI)
+  Ps: Instruction to install Android Studio is at the end of README
 
 ## Install
 

@@ -83,6 +83,125 @@ Key points:
 │  └─────────────────────────────────────┘ │
 └──────────────────────────────────────────┘
 ```
+## Android Emulator Setup
+Android Studio / Emulator Setup from Scratch
+
+This guide explains how to install Android Studio, create an Android virtual phone, and start it from the command line with adb and emulator.
+
+1. Install Android Studio
+
+Download Android Studio from the official Android Developers website:
+
+https://developer.android.com/studio
+
+Install it with official instruction, this part is easy.
+
+2. Create an Android Virtual Device
+
+Open Android Studio and create a virtual phone:
+
+Android Studio
+→ Device Manager
+→ Create Virtual Device
+
+Recommended settings:
+
+Device: Pixel / Medium Phone
+System Image: Android 12 or newer
+Image type: Google Play or Google APIs
+Architecture: arm64-v8a on Apple Silicon Macs
+
+After creating the device, start it once from Android Studio to confirm that it boots correctly.
+
+3. Add Android SDK Tools to PATH
+
+On macOS, the Android SDK is usually installed here:
+
+~/Library/Android/sdk
+
+Add the emulator and platform-tools directories to your shell PATH:
+
+echo 'export ANDROID_HOME="$HOME/Library/Android/sdk"' >> ~/.zshrc
+echo 'export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+
+Verify that the tools are available:
+
+adb version
+emulator -version
+
+4. List Available Virtual Devices
+
+Run:
+
+emulator -list-avds
+
+Example output:
+
+Medium_Phone_API_36.1
+
+5. Start the Virtual Phone from the Command Line
+
+Use the AVD name from the previous step.
+
+Example:
+
+emulator @Medium_Phone_API_36.1
+
+You can also start it with lower overhead:
+
+emulator @Medium_Phone_API_36.1 -no-boot-anim -no-audio
+
+Do not forget the @ before the AVD name.
+
+Alternatively, this format also works:
+
+emulator -avd Medium_Phone_API_36.1
+
+6. Check That ADB Can See the Device
+
+Open another terminal window and run:
+
+adb devices
+
+Expected output:
+
+List of devices attached
+emulator-5554   device
+
+If the device shows up as device, it is ready.
+
+
+7. Useful ADB Commands
+
+Take a screenshot:
+
+adb exec-out screencap -p > screen.png
+
+Tap the screen:
+
+adb shell input tap 500 1200
+
+Swipe / scroll:
+
+adb shell input swipe 500 1600 500 500 300
+
+Send the Back button:
+
+adb shell input keyevent 4
+
+Send the Home button:
+
+adb shell input keyevent 3
+
+Push a file from the Mac to the virtual phone:
+
+adb push ./example.pdf /sdcard/Download/
+
+Pull a file from the virtual phone to the Mac:
+
+adb pull /sdcard/Download/example.pdf .
+
 
 ## License
 

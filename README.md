@@ -1,4 +1,4 @@
-# virtual-phone-agent
+# hermes-phone-agent
 
 Two [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugins + one
 Android helper APK that let Hermes control and react to a virtual Android phone.

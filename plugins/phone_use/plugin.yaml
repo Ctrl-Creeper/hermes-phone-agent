@@ -1,5 +1,5 @@
 name: phone-use
-label: Phone Control (ADB)
+label: Phone Control (ADB / Appium Hybrid)
 kind: standalone
 version: 0.1.0
 description: >
@@ -15,6 +15,10 @@ optional_env:
     prompt: "Android device serial (or leave empty)"
     password: false
   - name: HERMES_PHONE_BACKEND
-    description: "Phone backend: 'adb' (default) or 'noop' (testing)"
+    description: "Phone backend: 'adb' (default), 'hybrid' (ADB + Appium), or 'noop' (testing)"
     prompt: "Phone backend"
+    password: false
+  - name: APPIUM_PORT
+    description: "Port for the auto-managed Appium server (default: 4723)"
+    prompt: "Appium server port"
     password: false

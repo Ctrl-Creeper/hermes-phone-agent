@@ -7,7 +7,7 @@ Android helper APK that let Hermes control and react to a virtual Android phone.
 
 | Component | Type | Purpose |
 |-----------|------|---------|
-| `plugins/phone_use` | Hermes tool plugin | Agent **controls** the phone — tap, swipe, type, screenshot, launch apps via ADB |
+| `plugins/phone_use` | Hermes tool plugin | Agent **controls** the phone — tap, swipe, type, screenshot, launch apps via ADB (with optional Appium hybrid for Unicode/WebView) |
 | `plugins/phone_events` | Hermes platform plugin | Phone **triggers** the agent — notifications, app switches, UI changes |
 | `helper-apk` | Android app | Runs on-device services that capture rich events and forward them to the host |
 
@@ -17,6 +17,10 @@ Android helper APK that let Hermes control and react to a virtual Android phone.
 - Android SDK Platform Tools (`adb` on PATH)
 - An Android emulator running (Android Studio AVD or `emulator` CLI)
   Ps: Instruction to install Android Studio is at the end of README
+
+**Optional** (for hybrid backend — Unicode text input and WebView support):
+- [Appium](https://appium.io/) (`npm install -g appium`)
+- Appium Python client (`pip install Appium-Python-Client`)
 
 ## Install
 
@@ -29,9 +33,6 @@ hermes plugins install Ctrl-Creeper/virtual-phone-agent/plugins/phone_events
 # Install helper APK on a running Android emulator and grant permissions
 git clone https://github.com/Ctrl-Creeper/virtual-phone-agent.git
 cd virtual-phone-agent
-./setup.sh
-
-# Install helper APK on running emulator and grant permissions
 ./setup.sh
 
 # To enable them, simply use
@@ -52,6 +53,29 @@ cp phone-policy.yaml ~/.hermes/phone-policy.yaml
 
 You can also ask any AI assistant to generate a config for you using the prompt template in POLICY.md.
 
+## Backend Configuration
+
+The plugin supports multiple backends via the `HERMES_PHONE_BACKEND` environment variable:
+
+| Value | Description |
+|-------|-------------|
+| `adb` (default) | Pure ADB — fast, no extra dependencies |
+| `hybrid` | ADB for most operations + Appium for Unicode text input and WebView interaction. Auto-starts and manages the Appium server. |
+| `noop` | No-op backend for testing |
+
+```bash
+# Use hybrid backend
+export HERMES_PHONE_BACKEND=hybrid
+
+# Custom Appium port (default: 4723)
+export APPIUM_PORT=4724
+
+# Specify device serial (auto-detected if only one device connected)
+export ANDROID_SERIAL=emulator-5554
+```
+
+The hybrid backend uses ADB for fast operations (screenshot, tap, swipe, keyevent, app management) and only starts Appium lazily when it needs Unicode text input or when ADB's `uiautomator dump` fails. If Appium is not installed, it falls back to pure ADB automatically.
+
 ## Security
 
 See [SECURITY.md](SECURITY.md) for the full threat model and mitigations.
@@ -67,22 +91,31 @@ Key points:
 ## Architecture
 
 ```
-┌──────────────────────────────────────────┐
-│  Host (PC / Mac)                         │
-│  ┌─────────────────┐  ┌───────────────┐  │
-│  │  phone_use      │  │ phone_events  │  │
-│  │  (tool plugin)  │  │ (platform)    │  │
-│  └────────┬────────┘  └───────┬───────┘  │
-│           │    ADB            │          │
-├───────────┼───────────────────┼──────────┤
-│  Android Emulator             │          │
-│  ┌─────────────────────────────────────┐ │
-│  │  phone-agent-helper.apk            │ │
-│  │  • NotificationListenerService     │ │
-│  │  • AccessibilityService            │ │
-│  │  • BroadcastReceiver               │ │
-│  └─────────────────────────────────────┘ │
-└──────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│  Host (PC / Mac)                                │
+│  ┌─────────────────────┐  ┌───────────────┐     │
+│  │  phone_use           │  │ phone_events  │     │
+│  │  (tool plugin)       │  │ (platform)    │     │
+│  │                      │  └───────┬───────┘     │
+│  │  ┌────────────────┐  │          │             │
+│  │  │ ADB Backend    │──┼── ADB ───┤             │
+│  │  └────────────────┘  │          │             │
+│  │  ┌────────────────┐  │          │             │
+│  │  │ Appium (opt.)  │──┼── HTTP ──┤             │
+│  │  └────────────────┘  │          │             │
+│  └──────────────────────┘          │             │
+│  ┌──────────────────┐              │             │
+│  │  Appium Server   │  (auto-managed, lazy-start)│
+│  └──────────────────┘              │             │
+├────────────────────────────────────┼─────────────┤
+│  Android Emulator                  │             │
+│  ┌───────────────────────────────────────────┐   │
+│  │  phone-agent-helper.apk                   │   │
+│  │  • NotificationListenerService            │   │
+│  │  • AccessibilityService                   │   │
+│  │  • BroadcastReceiver                      │   │
+│  └───────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────┘
 ```
 ## Android Studio / Emulator Setup from Scratch
 

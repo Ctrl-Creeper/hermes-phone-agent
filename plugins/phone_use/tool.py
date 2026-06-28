@@ -66,6 +66,10 @@ def _get_backend() -> PhoneBackend:
                 from .adb_backend import AdbBackend
                 serial = os.environ.get("ANDROID_SERIAL")
                 _backend = AdbBackend(serial=serial)
+            elif backend_name in ("hybrid", "appium"):
+                from .appium_backend import HybridBackend
+                serial = os.environ.get("ANDROID_SERIAL")
+                _backend = HybridBackend(serial=serial)
             elif backend_name == "noop":
                 _backend = _NoopBackend()
             else:

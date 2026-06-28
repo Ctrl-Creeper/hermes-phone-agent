@@ -76,6 +76,10 @@ export ANDROID_SERIAL=emulator-5554
 
 The hybrid backend uses ADB for fast operations (screenshot, tap, swipe, keyevent, app management) and only starts Appium lazily when it needs Unicode text input or when ADB's `uiautomator dump` fails. If Appium is not installed, it falls back to pure ADB automatically.
 
+## Using Without Hermes
+
+To use phone control from Claude, Codex, GPT, Gemini, or any other agent framework (without Hermes), see the standalone [phone-mcp-server](https://github.com/Ctrl-Creeper/phone-mcp-server) repo. It provides MCP and HTTP servers with the same backend and security model.
+
 ## Security
 
 See [SECURITY.md](SECURITY.md) for the full threat model and mitigations.

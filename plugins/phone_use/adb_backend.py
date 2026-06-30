@@ -15,7 +15,14 @@ import shutil
 import subprocess
 import tempfile
 import time
-import xml.etree.ElementTree as ET
+# Prefer defusedxml to harden against XXE / billion-laughs in the
+# uiautomator XML dump. Fall back to stdlib with a warning if unavailable.
+try:
+    from defusedxml import ElementTree as ET  # type: ignore[import-not-found]
+    _XML_HARDENED = True
+except ImportError:
+    import xml.etree.ElementTree as ET  # type: ignore[no-redef]
+    _XML_HARDENED = False
 from typing import Any, Dict, List, Optional, Tuple
 
 from .backend import (
@@ -36,6 +43,12 @@ from .sanitize import (
 )
 
 logger = logging.getLogger(__name__)
+
+if not _XML_HARDENED:
+    logger.warning(
+        "defusedxml not installed — falling back to stdlib XML parser. "
+        "Install for hardened parsing: pip install defusedxml"
+    )
 
 _REMOTE_SCREENSHOT = "/data/local/tmp/hermes_screen.png"
 _REMOTE_UIDUMP = "/data/local/tmp/hermes_uidump.xml"

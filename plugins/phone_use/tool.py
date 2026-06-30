@@ -35,6 +35,11 @@ _SAFE_ACTIONS = frozenset({
     "capture", "wait", "list_apps", "current_app", "device_info",
 })
 
+# Only these actions take an explicit package argument. For all other
+# non-safe actions (tap, swipe, type, etc.), the policy check uses the
+# foreground app — agent-supplied 'package' is ignored to prevent bypass.
+_PACKAGE_AWARE_ACTIONS = frozenset({"launch_app", "stop_app"})
+
 _APPROVAL_REQUIRED = frozenset({
     "tap", "double_tap", "long_press", "swipe",
     "type", "clear_text", "set_text", "keyevent",
@@ -124,8 +129,13 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
         })
 
     # Policy enforcement: check if the action is allowed for the target package.
-    target_pkg = args.get("package", "")
-    if not target_pkg and action not in _SAFE_ACTIONS:
+    # For launch_app/stop_app, the explicit 'package' arg is the target.
+    # For all other non-safe actions, use the foreground app — ignore any
+    # agent-supplied 'package' to prevent policy bypass.
+    target_pkg = ""
+    if action in _PACKAGE_AWARE_ACTIONS:
+        target_pkg = args.get("package", "")
+    elif action not in _SAFE_ACTIONS:
         try:
             fg = backend.current_app()
             target_pkg = fg.get("package", "")

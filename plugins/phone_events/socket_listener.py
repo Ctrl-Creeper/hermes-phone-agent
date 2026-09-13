@@ -1,17 +1,19 @@
 """Helper APK socket listener — Tier 2 event source.
 
 Receives structured JSON events from the on-device helper APK via
-an ADB-forwarded TCP socket. The helper APK opens a server socket
-on a high port; we forward it to localhost via `adb forward`.
+an ADB-forwarded TCP socket. The helper APK owns the server socket;
+the host connects to the local end of `adb forward`.
 
-Security: the helper APK sends a session token on connect. We validate
-it before accepting events. The token is generated per session and
-passed to the APK via `adb shell am broadcast`.
+Security: the host generates a per-session token, passes it to the APK via
+an ADB-only protected service start, then authenticates its forwarded socket
+connection with the same token before accepting events.
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import logging
 import os
 import secrets
@@ -28,6 +30,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_PORT = 18765
 _HELPER_PACKAGE = "com.hermes.phoneagent"
 _TOKEN_LENGTH = 32
+_AUTH_READY_TIMEOUT_SECONDS = 12.0
 
 
 class SocketListener:
@@ -45,7 +48,8 @@ class SocketListener:
         self._session_token: Optional[str] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._server_socket: Optional[socket.socket] = None
+        self._authenticated_event = threading.Event()
+        self._connection: Optional[socket.socket] = None
 
     @property
     def is_available(self) -> bool:
@@ -60,6 +64,10 @@ class SocketListener:
         except Exception:
             return False
 
+    @property
+    def is_authenticated(self) -> bool:
+        return self._authenticated_event.is_set()
+
     def start(self) -> None:
         if self._thread is not None:
             return
@@ -73,19 +81,26 @@ class SocketListener:
 
         self._session_token = secrets.token_hex(_TOKEN_LENGTH)
         self._setup_adb_forward()
-        self._send_token_to_apk()
+        self._start_helper_service()
 
         self._stop_event.clear()
+        self._authenticated_event.clear()
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="helper-socket-listener",
         )
         self._thread.start()
+        if not self._authenticated_event.wait(_AUTH_READY_TIMEOUT_SECONDS):
+            self.stop()
+            raise RuntimeError(
+                "helper socket did not authenticate before startup timeout"
+            )
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._server_socket:
+        self._authenticated_event.clear()
+        if self._connection:
             try:
-                self._server_socket.close()
+                self._connection.close()
             except Exception:
                 pass
         self._teardown_adb_forward()
@@ -101,12 +116,16 @@ class SocketListener:
         return cmd
 
     def _setup_adb_forward(self) -> None:
-        subprocess.run(
+        result = subprocess.run(
             self._adb_cmd(
                 "forward", f"tcp:{self._port}", f"tcp:{self._port}",
             ),
-            capture_output=True, timeout=10,
+            capture_output=True, text=True, timeout=10,
         )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"adb forward failed: {(result.stderr or result.stdout).strip()}"
+            )
 
     def _teardown_adb_forward(self) -> None:
         try:
@@ -117,65 +136,72 @@ class SocketListener:
         except Exception:
             pass
 
-    def _send_token_to_apk(self) -> None:
-        """Send session token to the helper APK via a broadcast intent."""
-        subprocess.run(
+    def _start_helper_service(self) -> None:
+        """Start the ADB-protected helper service with its session token."""
+        result = subprocess.run(
             self._adb_cmd(
-                "shell", "am", "broadcast",
-                "-a", f"{_HELPER_PACKAGE}.SET_TOKEN",
-                "-n", f"{_HELPER_PACKAGE}/.TokenReceiver",
+                "shell", "am", "start-foreground-service",
+                "-n", f"{_HELPER_PACKAGE}/.EventSocketService",
                 "--es", "token", self._session_token,
             ),
-            capture_output=True, timeout=10,
+            capture_output=True, text=True, timeout=10,
         )
+        if result.returncode != 0 or "Starting service" not in result.stdout:
+            raise RuntimeError(
+                f"helper service start failed: {(result.stderr or result.stdout).strip()}"
+            )
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
             try:
-                self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                self._server_socket.settimeout(2.0)
-                self._server_socket.bind(("127.0.0.1", self._port))
-                self._server_socket.listen(1)
-                logger.info("Helper socket listening on 127.0.0.1:%d", self._port)
-                self._accept_loop()
+                # `adb forward` owns the local listening port. The host is
+                # therefore the client, and the APK is the server.
+                connection = socket.create_connection(
+                    ("127.0.0.1", self._port), timeout=5.0
+                )
+                self._connection = connection
+                connection.settimeout(2.0)
+                nonce = secrets.token_hex(_TOKEN_LENGTH)
+                challenge = json.dumps({
+                    "type": "auth_challenge", "nonce": nonce,
+                }).encode("utf-8") + b"\n"
+                connection.sendall(challenge)
+                self._read_events(connection, nonce=nonce)
             except Exception as e:
                 if not self._stop_event.is_set():
                     logger.warning("socket listener error: %s", e)
-            finally:
-                if self._server_socket:
                     try:
-                        self._server_socket.close()
+                        # The emulator or helper process may have restarted.
+                        # Recreate the forward and start the ADB-protected
+                        # service with this listener's existing session token.
+                        self._setup_adb_forward()
+                        self._start_helper_service()
+                    except Exception as recovery_error:
+                        logger.warning(
+                            "helper socket recovery failed: %s", recovery_error,
+                        )
+            finally:
+                self._authenticated_event.clear()
+                if self._connection:
+                    try:
+                        self._connection.close()
                     except Exception:
                         pass
-                    self._server_socket = None
+                    self._connection = None
 
             if not self._stop_event.is_set():
                 self._stop_event.wait(3.0)
 
-    def _accept_loop(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                conn, addr = self._server_socket.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-
-            try:
-                self._handle_connection(conn)
-            except Exception as e:
-                logger.warning("helper connection error: %s", e)
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-
-    def _handle_connection(self, conn: socket.socket) -> None:
-        conn.settimeout(5.0)
+    def _read_events(self, conn: socket.socket, nonce: Optional[str] = None) -> None:
         buf = b""
-        authenticated = False
+        expected_proof = None
+        if nonce and self._session_token:
+            expected_proof = hmac.new(
+                self._session_token.encode("utf-8"),
+                f"helper:{nonce}".encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+        host_proved_identity = False
 
         while not self._stop_event.is_set():
             try:
@@ -185,6 +211,7 @@ class SocketListener:
             except OSError:
                 break
             if not data:
+                logger.warning("helper socket closed by peer")
                 break
             buf += data
 
@@ -200,18 +227,43 @@ class SocketListener:
                     logger.warning("invalid JSON from helper: %s", line_str[:100])
                     continue
 
-                # First message must be authentication.
-                if not authenticated:
-                    if msg.get("type") == "auth" and msg.get("token") == self._session_token:
-                        authenticated = True
-                        logger.info("helper APK authenticated")
-                        continue
-                    else:
-                        logger.warning("helper APK auth failed — closing connection")
-                        return
+                if msg.get("type") == "auth_proof":
+                    proof = str(msg.get("proof") or "")
+                    helper_nonce = str(msg.get("nonce") or "")
+                    if expected_proof is None or not hmac.compare_digest(
+                        proof, expected_proof,
+                    ):
+                        raise PermissionError("invalid helper authentication proof")
+                    if not 32 <= len(helper_nonce) <= 256 or not self._session_token:
+                        raise PermissionError("invalid helper authentication nonce")
+                    response = hmac.new(
+                        self._session_token.encode("utf-8"),
+                        f"host:{helper_nonce}".encode("utf-8"),
+                        hashlib.sha256,
+                    ).hexdigest()
+                    conn.sendall(json.dumps({
+                        "type": "auth_response", "proof": response,
+                    }).encode("utf-8") + b"\n")
+                    host_proved_identity = True
+                    continue
+                if msg.get("type") == "auth_ok":
+                    if not host_proved_identity:
+                        raise PermissionError("helper accepted an unproved host")
+                    self._authenticated_event.set()
+                    logger.info(
+                        "Authenticated helper socket on 127.0.0.1:%d", self._port,
+                    )
+                    continue
+                if not self._authenticated_event.is_set():
+                    logger.warning("event received before helper authentication")
+                    continue
 
                 event = self._parse_helper_event(msg)
                 if event and self._on_event:
+                    logger.info(
+                        "Received helper event: type=%s package=%s",
+                        event.event_type, event.package,
+                    )
                     self._on_event(event)
 
     @staticmethod
@@ -219,12 +271,16 @@ class SocketListener:
         event_type = msg.get("type", "")
         if event_type not in ("notification", "ui_change", "toast", "broadcast"):
             return None
+        meta = {
+            k: v for k, v in msg.items()
+            if k not in ("type", "package", "title", "body", "timestamp", "token")
+        }
+        meta["_transport"] = "helper_socket"
         return PhoneEvent(
             event_type=event_type,
             package=msg.get("package", ""),
             title=msg.get("title", ""),
             body=msg.get("body", ""),
             timestamp=msg.get("timestamp", time.time()),
-            meta={k: v for k, v in msg.items()
-                  if k not in ("type", "package", "title", "body", "timestamp", "token")},
+            meta=meta,
         )

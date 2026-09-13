@@ -1,7 +1,7 @@
 """ADB logcat stream monitor — Tier 1 event source.
 
-Runs `adb logcat` as a background subprocess and parses notification
-and activity lifecycle events from the stream.
+Runs `adb logcat` as a background subprocess and parses notifications,
+activity starts, and explicit Android crash events from the stream.
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ _NOTIFICATION_CONTENT = re.compile(
 _ACTIVITY_START = re.compile(
     r"ActivityManager.*START.*cmp=(\S+)/(\S+)"
 )
-_ACTIVITY_CRASH = re.compile(
-    r"ActivityManager.*Process\s+(\S+).*has died"
+_AM_CRASH_PATTERN = re.compile(
+    r"\bam_crash\b.*?:\s*\[\s*\d+\s*,\s*\d+\s*,\s*([^,\]\s]+)"
 )
 _TOAST_PATTERN = re.compile(
     r"NotificationService.*Toast.*pkg=(\S+).*text=(.+)"
@@ -76,16 +76,7 @@ class LogcatMonitor:
             self._thread = None
 
     def _run(self) -> None:
-        cmd = ["adb"]
-        if self._serial:
-            cmd.extend(["-s", self._serial])
-        cmd.extend([
-            "logcat",
-            "-s",
-            "NotificationService:I",
-            "ActivityManager:I",
-            "-v", "time",
-        ])
+        cmd = self._build_command()
 
         while not self._stop_event.is_set():
             try:
@@ -110,6 +101,24 @@ class LogcatMonitor:
             if not self._stop_event.is_set():
                 logger.info("logcat stream ended, reconnecting in 3s…")
                 self._stop_event.wait(3.0)
+
+    def _build_command(self) -> list[str]:
+        cmd = ["adb"]
+        if self._serial:
+            cmd.extend(["-s", self._serial])
+        cmd.extend([
+            "logcat",
+            "-b", "main",
+            "-b", "system",
+            "-b", "events",
+            "-s",
+            "NotificationService:I",
+            "ActivityManager:I",
+            "am_crash:I",
+            "*:S",
+            "-v", "time",
+        ])
+        return cmd
 
     def _read_stream(self) -> None:
         assert self._process and self._process.stdout
@@ -137,6 +146,7 @@ class LogcatMonitor:
                 body=body,
                 timestamp=now,
                 raw=line[:500],
+                meta={"_transport": "logcat"},
             )
 
         m = _ACTIVITY_START.search(line)
@@ -147,15 +157,17 @@ class LogcatMonitor:
                 title=m.group(2),
                 timestamp=now,
                 raw=line[:500],
+                meta={"_transport": "logcat"},
             )
 
-        m = _ACTIVITY_CRASH.search(line)
+        m = _AM_CRASH_PATTERN.search(line)
         if m:
             return PhoneEvent(
                 event_type="crash",
                 package=m.group(1),
                 timestamp=now,
                 raw=line[:500],
+                meta={"_transport": "logcat"},
             )
 
         m = _TOAST_PATTERN.search(line)
@@ -166,6 +178,7 @@ class LogcatMonitor:
                 body=m.group(2),
                 timestamp=now,
                 raw=line[:500],
+                meta={"_transport": "logcat"},
             )
 
         return None

@@ -6,18 +6,14 @@ import android.content.Intent
 import android.util.Log
 
 /**
- * Restarts the EventSocketService after device reboot.
- * The service won't forward events until a new session token
- * is set via TokenReceiver, so there's no security risk from
- * auto-starting.
+ * Records boot completion. The EventSocketService is started on demand by
+ * TokenReceiver when the host creates an authenticated session.
  */
 class BootReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-            Log.i(TAG, "Boot completed — starting EventSocketService")
-            val serviceIntent = Intent(context, EventSocketService::class.java)
-            context.startForegroundService(serviceIntent)
+            Log.i(TAG, "Boot completed — helper ready for a host session")
         }
     }
 

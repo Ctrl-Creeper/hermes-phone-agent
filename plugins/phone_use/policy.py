@@ -19,8 +19,10 @@ import logging
 import os
 import re
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, List, Optional, Set
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,8 @@ ALL_PHONE_ACTIONS = frozenset({
     "type", "clear_text", "set_text", "keyevent",
     "launch_app", "stop_app", "install_apk", "shell",
     "capture", "wait", "list_apps", "current_app", "device_info",
+    "wechat_open_chat", "wechat_reply", "wechat_collect_context",
+    "begin_workflow", "end_workflow",
 })
 
 
@@ -63,6 +67,7 @@ class EventRule:
     behavior: str = BEHAVIOR_REPORT
     blocked_actions: FrozenSet[str] = field(default_factory=frozenset)
     allowed_actions: FrozenSet[str] = field(default_factory=frozenset)
+    instruction_source: bool = False
     notes: str = ""
     priority: int = 0
 
@@ -73,6 +78,7 @@ class PolicyDecision:
     behavior: str = BEHAVIOR_REPORT
     blocked_actions: FrozenSet[str] = field(default_factory=frozenset)
     allowed_actions: FrozenSet[str] = field(default_factory=frozenset)
+    instruction_source: bool = False
     notes: str = ""
     source: str = "default"
 
@@ -94,6 +100,26 @@ class PolicyDecision:
         if self.allowed_actions and action not in self.allowed_actions:
             return False
         return True
+
+
+_event_policy_decision: ContextVar[Optional[PolicyDecision]] = ContextVar(
+    "phone_event_policy_decision", default=None,
+)
+
+
+@contextmanager
+def bind_event_policy(decision: Optional[PolicyDecision]) -> Iterator[None]:
+    """Bind an event decision to only the current gateway turn."""
+    token = _event_policy_decision.set(decision)
+    try:
+        yield
+    finally:
+        _event_policy_decision.reset(token)
+
+
+def get_event_policy() -> Optional[PolicyDecision]:
+    """Return the policy decision for the current phone-triggered turn."""
+    return _event_policy_decision.get()
 
 
 # ── Policy class ───────────────────────────────────────────────────
@@ -132,8 +158,9 @@ class PhonePolicy:
             if self._event_rule_matches(rule, package, event_type, title, body):
                 return PolicyDecision(
                     behavior=rule.behavior,
-                    blocked_actions=rule.blocked_actions | self.global_restrict,
+                    blocked_actions=rule.blocked_actions,
                     allowed_actions=rule.allowed_actions,
+                    instruction_source=rule.instruction_source,
                     notes=rule.notes,
                     source=f"event_rule(pkg={rule.package!r}, event={rule.event_type!r}, p={rule.priority})",
                 )
@@ -143,7 +170,7 @@ class PhonePolicy:
         if profile is not None:
             return PolicyDecision(
                 behavior=profile.on_event,
-                blocked_actions=profile.blocked_actions | self.global_restrict,
+                blocked_actions=profile.blocked_actions,
                 allowed_actions=profile.allowed_actions,
                 notes=profile.notes,
                 source=f"app_profile({profile.name!r})",
@@ -152,29 +179,23 @@ class PhonePolicy:
         # Tier 3: default
         return PolicyDecision(
             behavior=self.default_behavior,
-            blocked_actions=self.global_restrict,
             source="default",
         )
+
+    def requires_approval(self, action: str) -> bool:
+        """Return whether policy requires explicit approval for this action."""
+        return action in self.global_restrict
 
     def check_action(
         self, action: str, target_package: str = "",
     ) -> PolicyDecision:
         """Check if a phone_use action is allowed for a given package."""
-        # Global restrict always applies.
-        if action in self.global_restrict:
-            return PolicyDecision(
-                behavior=BEHAVIOR_REPORT,
-                blocked_actions=self.global_restrict,
-                notes=f"'{action}' is globally restricted by policy",
-                source="global_restrict",
-            )
-
         # Check app profile for the target package.
         profile = self._find_profile(target_package)
         if profile is not None:
             decision = PolicyDecision(
                 behavior=profile.on_event,
-                blocked_actions=profile.blocked_actions | self.global_restrict,
+                blocked_actions=profile.blocked_actions,
                 allowed_actions=profile.allowed_actions,
                 notes=profile.notes,
                 source=f"app_profile({profile.name!r})",
@@ -188,7 +209,6 @@ class PhonePolicy:
 
         return PolicyDecision(
             behavior=self.default_behavior,
-            blocked_actions=self.global_restrict,
             source="default",
         )
 
@@ -302,6 +322,7 @@ def _parse_config(raw: Dict[str, Any]) -> PhonePolicy:
             behavior=behavior,
             blocked_actions=frozenset(entry.get("blocked_actions", entry.get("restrict", []))),
             allowed_actions=frozenset(entry.get("allowed_actions", entry.get("allow", []))),
+            instruction_source=entry.get("instruction_source") is True,
             notes=entry.get("notes", entry.get("summary", "")).strip(),
             priority=int(entry.get("priority", 0)),
         ))

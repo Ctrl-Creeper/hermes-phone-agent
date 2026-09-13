@@ -27,12 +27,12 @@
 
 ```bash
 # 安装两个 Hermes 插件
-hermes plugins install Ctrl-Creeper/virtual-phone-agent/plugins/phone_use 
-hermes plugins install Ctrl-Creeper/virtual-phone-agent/plugins/phone_events
+hermes plugins install Ctrl-Creeper/hermes-phone-agent/plugins/phone_use
+hermes plugins install Ctrl-Creeper/hermes-phone-agent/plugins/phone_events
 
 # 在运行中的 Android 模拟器上安装辅助 APK 并授予权限
-git clone https://github.com/Ctrl-Creeper/virtual-phone-agent.git
-cd virtual-phone-agent
+git clone https://github.com/Ctrl-Creeper/hermes-phone-agent.git
+cd hermes-phone-agent
 ./setup.sh
 
 # 启用插件
@@ -70,9 +70,39 @@ export HERMES_PHONE_BACKEND=hybrid
 # 自定义 Appium 端口（默认：4723）
 export APPIUM_PORT=4724
 
-# 指定设备序列号（仅连接一台设备时自动检测）
-export ANDROID_SERIAL=emulator-5554
 ```
+
+Hermes 用户应在 `~/.hermes/config.yaml` 中配置模拟器和 Telegram 目标；
+`phone_use` 与 `phone_events` 会共用同一个序列号：
+
+```yaml
+platforms:
+  phone_events:
+    enabled: true
+    extra:
+      telegram_chat_id: "<你的-Telegram-chat-id>"
+      telegram_user_id: "<你的-Telegram-user-id>"
+      serial: "emulator-5554"
+      raw_notifications: false
+```
+
+`ANDROID_SERIAL` 仅保留为独立运行时的兼容回退。
+通知默认经过脱敏和截断。只有 Telegram 目标为私人会话且你明确需要原文时，
+才设置 `raw_notifications: true`。
+
+## 确定性微信工作流
+
+`phone_use` 提供打开会话、收集最近聊天记录和回复消息的组合操作。它通过
+微信搜索定位会话，并在进入后校验标题，不依赖会话列表中的固定位置。对于
+无障碍控件树为空或不完整的微信界面，会自动使用宿主机 OCR。
+宿主 OCR 回退目前需要 macOS 和 `swiftc`，`setup.sh` 会自动编译安装；其他平台
+仍可使用 Android 无障碍控件树与截图。
+
+如需自动任务收件箱，请在复制到 `~/.hermes/phone-policy.yaml` 的策略中添加
+`event_rules`。只有经过认证且包含明确触发词的规则才应设置
+`instruction_source: true`，同时只允许该工作流需要的操作。回复流程会在发送前
+恢复导航错误；一旦尝试发送，就不会因为确认失败而再次发送，从而避免联网搜索后
+的长回复重复出现。
 
 混合后端使用 ADB 执行快速操作（截图、点击、滑动、按键、应用管理），仅在需要 Unicode 文本输入或 ADB 的 `uiautomator dump` 失败时才懒加载启动 Appium。如果未安装 Appium，自动回退到纯 ADB。
 

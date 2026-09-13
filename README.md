@@ -29,12 +29,12 @@ Android helper APK that let Hermes control and react to a virtual Android phone.
 ```bash
 
 # Install both Hermes plugins
-hermes plugins install Ctrl-Creeper/virtual-phone-agent/plugins/phone_use 
-hermes plugins install Ctrl-Creeper/virtual-phone-agent/plugins/phone_events
+hermes plugins install Ctrl-Creeper/hermes-phone-agent/plugins/phone_use
+hermes plugins install Ctrl-Creeper/hermes-phone-agent/plugins/phone_events
 
 # Install helper APK on a running Android emulator and grant permissions
-git clone https://github.com/Ctrl-Creeper/virtual-phone-agent.git
-cd virtual-phone-agent
+git clone https://github.com/Ctrl-Creeper/hermes-phone-agent.git
+cd hermes-phone-agent
 ./setup.sh
 
 # To enable them, simply use
@@ -72,9 +72,44 @@ export HERMES_PHONE_BACKEND=hybrid
 # Custom Appium port (default: 4723)
 export APPIUM_PORT=4724
 
-# Specify device serial (auto-detected if only one device connected)
-export ANDROID_SERIAL=emulator-5554
 ```
+
+For Hermes, configure the device and Telegram destination in
+`~/.hermes/config.yaml`. `phone_use` and `phone_events` share this serial:
+
+```yaml
+platforms:
+  phone_events:
+    enabled: true
+    extra:
+      telegram_chat_id: "<your-telegram-chat-id>"
+      telegram_user_id: "<your-telegram-user-id>"
+      serial: "emulator-5554"
+      raw_notifications: false
+```
+
+`ANDROID_SERIAL` remains a legacy fallback for standalone use.
+Notification reports are redacted and truncated by default. Set
+`raw_notifications: true` only when the Telegram destination is private and
+you explicitly want verbatim notification title/body delivery.
+
+## Deterministic WeChat Workflows
+
+`phone_use` includes composite actions for opening a conversation, collecting
+recent context, and replying. Conversation titles are found through WeChat
+search and verified after navigation, so workflows do not depend on a fixed
+row position. Host-side OCR supports WeChat screens whose accessibility tree
+is blank or incomplete.
+The host OCR fallback currently requires macOS with `swiftc`; `setup.sh`
+builds and installs it automatically. Other platforms continue using Android's
+accessibility hierarchy and screenshots.
+
+For automated task inboxes, add an `event_rules` entry to your copied
+`~/.hermes/phone-policy.yaml`. Mark only an authenticated, explicit trigger as
+`instruction_source: true`, and allow only the actions that workflow needs.
+The included reply flow retries navigation failures before sending; after a
+send attempt it never resends an unconfirmed message, preventing duplicate
+long replies after web research.
 
 The hybrid backend uses ADB for fast operations (screenshot, tap, swipe, keyevent, app management) and only starts Appium lazily when it needs Unicode text input or when ADB's `uiautomator dump` fails. If Appium is not installed, it falls back to pure ADB automatically.
 

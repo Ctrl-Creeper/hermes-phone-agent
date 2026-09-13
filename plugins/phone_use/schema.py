@@ -30,10 +30,52 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                     "swipe", "type", "clear_text", "set_text",
                     "keyevent", "launch_app", "stop_app", "list_apps",
                     "current_app", "install_apk", "shell",
-                    "wait", "device_info",
+                    "wait", "device_info", "wechat_open_chat",
+                    "wechat_reply", "wechat_collect_context",
+                    "begin_workflow", "end_workflow",
                 ],
                 "description": (
-                    "Which action to perform. 'capture' is read-only."
+                    "Which action to perform. 'capture' is read-only. Every "
+                    "state-changing action and wait automatically returns a "
+                    "text-only follow-up capture. Use 'wechat_open_chat' to "
+                    "launch WeChat and open a visible conversation in one "
+                    "call. Use 'wechat_reply' to propose and execute a reply: "
+                    "call it directly without asking separately. Authenticated "
+                    "automatic task events are pre-authorized by host policy; "
+                    "other conversations still require approval. The call shows the exact chat "
+                    "and text, sends it, and always returns to Home."
+                    " Use 'wechat_collect_context' for bounded multi-page "
+                    "reading before a complex reply; pass the original scope "
+                    "phrase when the message specifies one."
+                    " For a general multi-step operation, call "
+                    "'begin_workflow' once with the complete goal, perform "
+                    "all approved steps, then always call 'end_workflow'. "
+                    "The approval is limited to this turn and expires after "
+                    "five minutes."
+                ),
+            },
+            "goal": {
+                "type": "string",
+                "description": (
+                    "Exact human-readable operation proposed for "
+                    "begin_workflow. Include the destination and intended "
+                    "outcome so one approval covers the complete operation."
+                ),
+            },
+            "allowed_actions": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": [
+                        "tap", "double_tap", "long_press", "swipe",
+                        "type", "clear_text", "set_text", "keyevent",
+                        "launch_app", "stop_app", "wechat_open_chat",
+                    ],
+                },
+                "description": (
+                    "Optional actions covered by begin_workflow. Omit to "
+                    "allow ordinary interactive phone actions. shell, "
+                    "install_apk, and wechat_reply never inherit approval."
                 ),
             },
             "mode": {
@@ -80,6 +122,40 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                 "type": "string",
                 "description": "Text to type or set. Max 500 chars per call.",
             },
+            "chat": {
+                "type": "string",
+                "description": (
+                    "Visible WeChat conversation title for wechat_open_chat "
+                    "or wechat_reply."
+                ),
+            },
+            "scope": {
+                "type": "string",
+                "description": (
+                    "Original explicit WeChat history range, such as "
+                    "'最近20条', '最近2小时', or '今天'. Leave empty for the "
+                    "default bounded range."
+                ),
+            },
+            "max_messages": {
+                "type": "integer", "minimum": 1, "maximum": 200,
+                "description": "Default message-line limit (default 50).",
+            },
+            "max_pages": {
+                "type": "integer", "minimum": 1, "maximum": 12,
+                "description": "Maximum WeChat history pages (default 8).",
+            },
+            "max_minutes": {
+                "type": "integer", "minimum": 1, "maximum": 1440,
+                "description": "Default history age in minutes (default 10).",
+            },
+            "include_images": {
+                "type": "boolean",
+                "description": (
+                    "Return up to five full-page screenshots for visual "
+                    "analysis. Never opens uncertain image bubbles."
+                ),
+            },
             "keycode": {
                 "type": "string",
                 "description": (
@@ -107,10 +183,6 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
             "seconds": {
                 "type": "number",
                 "description": "Seconds to wait. Max 30.",
-            },
-            "capture_after": {
-                "type": "boolean",
-                "description": "Take a follow-up capture after the action.",
             },
         },
         "required": ["action"],

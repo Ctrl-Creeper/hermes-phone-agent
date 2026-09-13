@@ -150,7 +150,7 @@ def validate_coordinate(
 ) -> None:
     """Validate touch coordinates are within screen bounds."""
     if x is not None and y is not None:
-        if not (0 <= x <= screen_width and 0 <= y <= screen_height):
+        if not (0 <= x < screen_width and 0 <= y < screen_height):
             raise ValueError(
                 f"coordinate ({x}, {y}) out of screen bounds "
                 f"({screen_width}x{screen_height})"

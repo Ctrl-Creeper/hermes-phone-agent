@@ -32,6 +32,7 @@ from .backend import (
     PhoneBackend,
     UIElement,
 )
+from .host_ocr import add_semantic_regions, recognize_text
 from .sanitize import (
     validate_activity_name,
     validate_apk_path,
@@ -52,10 +53,29 @@ if not _XML_HARDENED:
 
 _REMOTE_SCREENSHOT = "/data/local/tmp/hermes_screen.png"
 _REMOTE_UIDUMP = "/data/local/tmp/hermes_uidump.xml"
+_HELPER_SERVICE = "com.hermes.phoneagent/.EventSocketService"
+_SET_CLIPBOARD_ACTION = "com.hermes.phoneagent.SET_CLIPBOARD"
 
 
 def adb_available() -> bool:
     return shutil.which("adb") is not None
+
+
+def _hierarchy_is_usable(elements: List[UIElement]) -> bool:
+    for element in elements:
+        left, top, right, bottom = element.bounds
+        if right <= left or bottom <= top:
+            continue
+        if (
+            element.text
+            or element.content_desc
+            or element.resource_id
+            or element.clickable
+            or element.scrollable
+            or element.focusable
+        ):
+            return True
+    return False
 
 
 class AdbBackend(PhoneBackend):
@@ -169,18 +189,40 @@ class AdbBackend(PhoneBackend):
         info = self.device_info()
         png_b64 = None
         elements: List[UIElement] = []
+        used_host_ocr = False
+        fg = self._get_foreground_app()
+        use_direct_ocr = fg.get("package") == "com.tencent.mm"
 
         if mode in ("som", "screenshot"):
             png_b64 = self._take_screenshot()
 
         if mode in ("som", "hierarchy"):
-            elements = self._dump_ui_hierarchy()
+            if not use_direct_ocr:
+                elements = self._dump_ui_hierarchy()
+            if not _hierarchy_is_usable(elements):
+                ocr_png_b64 = png_b64 or self._take_screenshot()
+                if ocr_png_b64:
+                    ocr_elements = recognize_text(ocr_png_b64)
+                    if ocr_elements:
+                        elements = ocr_elements
+                        used_host_ocr = True
+                        logger.info(
+                            "Host OCR fallback produced %d text elements",
+                            len(elements),
+                        )
+        if used_host_ocr:
+            elements = add_semantic_regions(
+                elements,
+                package=fg.get("package", ""),
+                width=info.screen_width,
+                height=info.screen_height,
+            )
+        if mode in ("som", "hierarchy"):
             self._last_elements = elements
-
-        fg = self._get_foreground_app()
         return CaptureResult(
             mode=mode, width=info.screen_width, height=info.screen_height,
-            png_b64=png_b64, elements=elements,
+            png_b64=png_b64 if mode != "hierarchy" else None,
+            elements=elements,
             current_package=fg.get("package", ""),
             current_activity=fg.get("activity", ""),
             png_bytes_len=len(base64.b64decode(png_b64)) if png_b64 else 0,
@@ -260,10 +302,26 @@ class AdbBackend(PhoneBackend):
         )
         if result.returncode == 0:
             for line in result.stdout.splitlines():
-                if "mResumedActivity" in line:
-                    m = re.search(r"(\S+)/(\S+)", line)
-                    if m:
-                        return {"package": m.group(1), "activity": m.group(2)}
+                # Android 12+ reports ``topResumedActivity`` while older
+                # releases use ``mResumedActivity``/``ResumedActivity``.
+                # ``mCurrentFocus`` is a useful final fallback when the
+                # activity manager output is transient during a switch.
+                if not any(
+                    marker in line
+                    for marker in (
+                        "topResumedActivity=",
+                        "mResumedActivity=",
+                        "ResumedActivity:",
+                        "mCurrentFocus=",
+                    )
+                ):
+                    continue
+                m = re.search(r"\bu\d+\s+(\S+)/(\S+)", line)
+                if m:
+                    return {
+                        "package": m.group(1).rstrip("}"),
+                        "activity": m.group(2).rstrip("}"),
+                    }
         return {"package": "", "activity": ""}
 
     # ── Element resolution ──────────────────────────────────────────
@@ -357,6 +415,32 @@ class AdbBackend(PhoneBackend):
         if element is not None:
             self.tap(element=element)
             time.sleep(0.3)
+        # `adb shell` joins its arguments into a remote shell command, so an
+        # argv list alone does not protect punctuation such as `&`. Use the
+        # helper clipboard unless Android's input-text argument is strictly
+        # shell-neutral.
+        if text and re.fullmatch(r"[A-Za-z0-9._-]+", text) is None:
+            encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            clipboard = self._adb_shell(
+                "am", "start-foreground-service",
+                "-n", _HELPER_SERVICE,
+                "-a", _SET_CLIPBOARD_ACTION,
+                "--es", "text_b64", encoded,
+            )
+            if clipboard.returncode != 0:
+                return ActionResult(
+                    ok=False,
+                    action="type",
+                    message="helper clipboard input failed",
+                )
+            time.sleep(0.1)
+            pasted = self._adb_shell("input", "keyevent", "279")
+            time.sleep(0.4)
+            return ActionResult(
+                ok=pasted.returncode == 0,
+                action="type",
+                message=f"typed {len(text)} chars (helper clipboard)",
+            )
         escaped = text.replace("%", "%%").replace(" ", "%s")
         result = self._adb_shell("input", "text", escaped)
         ok = result.returncode == 0
@@ -378,6 +462,7 @@ class AdbBackend(PhoneBackend):
             )
         time.sleep(0.1)
         self._adb_shell("input", "keyevent", "KEYCODE_DEL")
+        time.sleep(0.4)
         return ActionResult(ok=True, action="clear_text", message="cleared field")
 
     def set_text(self, text: str, element: Optional[int] = None) -> ActionResult:

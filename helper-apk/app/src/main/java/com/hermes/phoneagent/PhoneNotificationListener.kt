@@ -1,5 +1,6 @@
 package com.hermes.phoneagent
 
+import android.app.Notification
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -9,11 +10,10 @@ import org.json.JSONObject
  * Listens for notifications and posts structured events to EventBus.
  *
  * SECURITY:
- * - We extract only: package, title, text, timestamp.
+ * - We extract only: package, application label, title, text, timestamp.
  * - We do NOT extract: icons, actions, extras, PendingIntents.
- * - Notification text is capped at 200 chars to limit data exposure.
- * - The host-side redaction layer strips OTPs and sensitive patterns
- *   before the text reaches the LLM.
+ * - Report-only events are delivered directly to the configured human channel.
+ * - The host-side redaction layer protects content that reaches the LLM.
  */
 class PhoneNotificationListener : NotificationListenerService() {
 
@@ -22,8 +22,17 @@ class PhoneNotificationListener : NotificationListenerService() {
             val notification = sbn.notification ?: return
             val extras = notification.extras ?: return
 
-            val title = extras.getCharSequence("android.title")?.toString() ?: ""
-            val text = extras.getCharSequence("android.text")?.toString() ?: ""
+            val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
+            val text = (
+                extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
+                    ?: extras.getCharSequence(Notification.EXTRA_TEXT)
+            )?.toString() ?: ""
+            val appName = try {
+                val appInfo = packageManager.getApplicationInfo(sbn.packageName, 0)
+                packageManager.getApplicationLabel(appInfo).toString()
+            } catch (_: Exception) {
+                sbn.packageName
+            }
 
             // Skip empty notifications and system noise.
             if (title.isBlank() && text.isBlank()) return
@@ -32,8 +41,10 @@ class PhoneNotificationListener : NotificationListenerService() {
             val event = JSONObject().apply {
                 put("type", "notification")
                 put("package", sbn.packageName)
-                put("title", title.take(MAX_FIELD_LENGTH))
-                put("body", text.take(MAX_FIELD_LENGTH))
+                put("notification_key", sbn.key)
+                put("app_name", appName)
+                put("title", title)
+                put("body", text)
                 put("timestamp", sbn.postTime / 1000.0)
             }
             EventBus.post(event)
@@ -48,6 +59,5 @@ class PhoneNotificationListener : NotificationListenerService() {
 
     companion object {
         private const val TAG = "HermesNotif"
-        private const val MAX_FIELD_LENGTH = 200
     }
 }

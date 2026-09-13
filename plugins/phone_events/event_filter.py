@@ -28,7 +28,14 @@ class PhoneEvent:
 
     @property
     def dedup_key(self) -> str:
-        content = f"{self.event_type}:{self.package}:{self.title}:{self.body}"
+        notification_key = self.meta.get("notification_key")
+        if self.event_type == "notification" and notification_key:
+            content = (
+                f"{self.event_type}:{self.package}:{notification_key}:"
+                f"{self.title}:{self.body}"
+            )
+        else:
+            content = f"{self.event_type}:{self.package}:{self.title}:{self.body}"
         return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 

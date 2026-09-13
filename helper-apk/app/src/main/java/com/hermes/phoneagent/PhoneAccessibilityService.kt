@@ -26,7 +26,6 @@ class PhoneAccessibilityService : AccessibilityService() {
             val eventType = when (event.eventType) {
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> "window_state_changed"
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> "window_content_changed"
-                AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> "notification_state_changed"
                 else -> return  // Ignore event types we didn't subscribe to.
             }
 

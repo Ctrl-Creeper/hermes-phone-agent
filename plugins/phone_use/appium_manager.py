@@ -47,7 +47,7 @@ class AppiumServer:
     def __init__(self, port: int = _DEFAULT_PORT):
         self.port = port
         self._process: Optional[subprocess.Popen] = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._started = False
 
     @property

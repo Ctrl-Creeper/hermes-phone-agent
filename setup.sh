@@ -15,7 +15,13 @@ set -euo pipefail
 
 HELPER_PACKAGE="com.hermes.phoneagent"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APK_PATH="${SCRIPT_DIR}/helper-apk/releases/phone-agent-helper.apk"
+BUILT_APK_PATH="${SCRIPT_DIR}/helper-apk/app/build/outputs/apk/debug/app-debug.apk"
+RELEASE_APK_PATH="${SCRIPT_DIR}/helper-apk/releases/phone-agent-helper.apk"
+if [[ -f "$BUILT_APK_PATH" ]]; then
+    APK_PATH="$BUILT_APK_PATH"
+else
+    APK_PATH="$RELEASE_APK_PATH"
+fi
 
 # Parse args
 ADB_SERIAL=""
@@ -67,44 +73,52 @@ if [[ ! -f "$APK_PATH" ]]; then
 fi
 $ADB_CMD install -r "$APK_PATH"
 echo "   Installed."
+# PackageManager may clear listener grants asynchronously just after an APK
+# update. Wait for that bookkeeping before rewriting the authoritative lists.
+sleep 1
 
-# Grant NotificationListener permission
+# Grant NotificationListener permission through NotificationManager. Writing
+# enabled_notification_listeners directly can leave the secure setting updated
+# while NotificationManager still considers the listener unapproved.
 echo "3. Granting NotificationListener permission..."
-CURRENT=$($ADB_CMD shell settings get secure enabled_notification_listeners 2>/dev/null || true)
 LISTENER="${HELPER_PACKAGE}/${HELPER_PACKAGE}.PhoneNotificationListener"
-if [[ "$CURRENT" != *"$LISTENER"* ]]; then
-    if [[ -n "$CURRENT" && "$CURRENT" != "null" ]]; then
-        NEW="${CURRENT}:${LISTENER}"
-    else
-        NEW="$LISTENER"
-    fi
-    $ADB_CMD shell settings put secure enabled_notification_listeners "$NEW"
-fi
+$ADB_CMD shell cmd notification allow_listener "$LISTENER"
 echo "   NotificationListener granted."
 
 # Grant AccessibilityService permission
 echo "4. Granting AccessibilityService permission..."
 A11Y_SERVICE="${HELPER_PACKAGE}/${HELPER_PACKAGE}.PhoneAccessibilityService"
 CURRENT_A11Y=$($ADB_CMD shell settings get secure enabled_accessibility_services 2>/dev/null || true)
-if [[ "$CURRENT_A11Y" != *"$A11Y_SERVICE"* ]]; then
-    if [[ -n "$CURRENT_A11Y" && "$CURRENT_A11Y" != "null" ]]; then
-        NEW_A11Y="${CURRENT_A11Y}:${A11Y_SERVICE}"
-    else
-        NEW_A11Y="$A11Y_SERVICE"
-    fi
-    $ADB_CMD shell settings put secure enabled_accessibility_services "$NEW_A11Y"
-    $ADB_CMD shell settings put secure accessibility_enabled 1
+NEW_A11Y=""
+if [[ -n "$CURRENT_A11Y" && "$CURRENT_A11Y" != "null" ]]; then
+    IFS=':' read -r -a CURRENT_A11Y_SERVICES <<< "$CURRENT_A11Y"
+    for COMPONENT in "${CURRENT_A11Y_SERVICES[@]}"; do
+        [[ "$COMPONENT" == "$A11Y_SERVICE" ]] && continue
+        NEW_A11Y="${NEW_A11Y:+${NEW_A11Y}:}${COMPONENT}"
+    done
 fi
+$ADB_CMD shell settings put secure enabled_accessibility_services "${NEW_A11Y:+${NEW_A11Y}:}${A11Y_SERVICE}"
+$ADB_CMD shell settings put secure accessibility_enabled 1
 echo "   AccessibilityService granted."
 
-# Start the socket service
-echo "5. Starting EventSocketService..."
-$ADB_CMD shell am startservice \
-    -n "${HELPER_PACKAGE}/.EventSocketService" \
-    --user 0 2>/dev/null || \
-$ADB_CMD shell am start-foreground-service \
-    -n "${HELPER_PACKAGE}/.EventSocketService" 2>/dev/null || true
-echo "   Service started."
+# The socket service is exported only behind Android's signature-level
+# WRITE_SECURE_SETTINGS permission, which ADB shell holds and ordinary apps do
+# not. Hermes starts it with a per-session token on first connection.
+echo "5. Socket service will start on the first Hermes session."
+
+# Build the optional macOS Vision OCR helper used when an app exposes an empty
+# accessibility hierarchy (notably some WeChat builds).
+if [[ "$(uname -s)" == "Darwin" ]] && command -v swiftc &>/dev/null; then
+    echo "6. Installing macOS host OCR helper..."
+    mkdir -p "${HOME}/.hermes/bin"
+    swiftc "${SCRIPT_DIR}/plugins/phone_use/native/phone_ocr.swift" \
+        -o "${HOME}/.hermes/bin/phone-ocr" \
+        -framework Vision -framework ImageIO -framework CoreGraphics
+    chmod 700 "${HOME}/.hermes/bin/phone-ocr"
+    echo "   Host OCR installed."
+else
+    echo "6. Host OCR skipped (requires macOS and swiftc)."
+fi
 
 echo ""
 echo "=== Setup complete ==="

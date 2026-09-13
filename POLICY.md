@@ -69,14 +69,14 @@ event_rules:
 1. **Event rules** — checked first, highest priority wins
 2. **App profiles** — checked if no event rule matched
 3. **Default behavior** — used if nothing else matched
-4. **Global restrict** — always applied on top of everything
+4. **Global restrict** — always requires a fresh human approval; it does not override app-profile hard blocks
 
 ### Available Actions
 
 | Category | Actions |
 |----------|---------|
-| Read-only | `capture`, `wait`, `list_apps`, `current_app`, `device_info` |
-| Interactive | `tap`, `double_tap`, `long_press`, `swipe`, `type`, `clear_text`, `set_text`, `keyevent`, `launch_app`, `stop_app` |
+| Read-only | `capture`, `wait`, `list_apps`, `current_app`, `device_info`, `wechat_collect_context` |
+| Interactive | `tap`, `double_tap`, `long_press`, `swipe`, `type`, `clear_text`, `set_text`, `keyevent`, `launch_app`, `stop_app`, `wechat_open_chat`, `wechat_reply` |
 | Dangerous | `install_apk`, `shell` |
 
 ### Package Matching
@@ -106,7 +106,7 @@ event_rules:
     priority: 5
 ```
 
-### "Auto-reply to my girlfriend on WeChat, report everyone else"
+### "Use an explicit WeChat mention as an automatic task inbox"
 
 ```yaml
 default_behavior: report
@@ -115,9 +115,17 @@ event_rules:
   - match:
       package: "com.tencent.mm"
       event: notification
-      title_regex: "^Alice$"
+      title_regex: "(?i)@phone_agent"
     behavior: auto
-    notes: "Auto-reply to Alice on WeChat. Be friendly and brief."
+    instruction_source: true
+    allowed_actions:
+      - capture
+      - current_app
+      - device_info
+      - wechat_open_chat
+      - wechat_collect_context
+      - wechat_reply
+    notes: "Handle explicit @phone_agent requests and reply briefly and naturally."
     priority: 10
 
   - match:
@@ -127,7 +135,7 @@ event_rules:
     notes: "Other WeChat messages — ask me first."
 ```
 
-### "Full lockdown — report everything, block all interaction"
+### "Approval lockdown — report everything, approve every interaction"
 
 ```yaml
 default_behavior: report
@@ -142,6 +150,9 @@ global_restrict:
   - launch_app
   - stop_app
 ```
+
+For a hard prohibition, put actions in an app profile's `blocked_actions`.
+Those actions stay forbidden even after an approval command.
 
 ---
 
@@ -215,14 +226,15 @@ event_rules:           # fine-grained pattern matching
       title_regex: "regex pattern"
       body_regex: "regex pattern"
     behavior: auto | report | ignore
+    instruction_source: true  # optional configured task inbox marker
     allowed_actions: [action, ...]
     notes: "instruction for the AI agent"
     priority: 0-10     # higher = matched first
 ```
 
 Available actions:
-  Read-only: capture, wait, list_apps, current_app, device_info
-  Interactive: tap, double_tap, long_press, swipe, type, clear_text, set_text, keyevent, launch_app, stop_app
+  Read-only: capture, wait, list_apps, current_app, device_info, wechat_collect_context
+  Interactive: tap, double_tap, long_press, swipe, type, clear_text, set_text, keyevent, launch_app, stop_app, wechat_open_chat, wechat_reply
   Dangerous: install_apk, shell
 
 Rules:

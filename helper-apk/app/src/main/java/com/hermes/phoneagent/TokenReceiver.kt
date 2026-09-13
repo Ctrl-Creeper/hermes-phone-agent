@@ -11,8 +11,8 @@ import android.util.Log
  *     -n com.hermes.phoneagent/.TokenReceiver --es token <hex>
  *
  * SECURITY:
- * - Receiver is not exported (android:exported="false") — only
- *   processes with the same UID or root (ADB) can send to it.
+ * - Receiver remains private. Current hosts start the protected socket
+ *   service directly; this receiver is retained for same-UID compatibility.
  * - Token is stored in memory only (EventBus.sessionToken),
  *   never persisted to disk.
  * - Token is validated on every socket connection handshake.
@@ -30,6 +30,11 @@ class TokenReceiver : BroadcastReceiver() {
             return
         }
         EventBus.setToken(token)
+        // The host sends this broadcast for each session. Starting the
+        // service here keeps the service private (exported=false) while
+        // still allowing ADB-driven sessions to start it on demand.
+        val serviceIntent = Intent(context, EventSocketService::class.java)
+        context.startForegroundService(serviceIntent)
         Log.i(TAG, "Session token set (${token.length} chars)")
     }
 

@@ -171,11 +171,17 @@ def _return_phone_home() -> None:
     return_phone_home()
 
 
-async def _dispatch_with_event_policy(telegram_adapter, message, decision) -> None:
+async def _dispatch_with_event_policy(
+    telegram_adapter, message, decision, persona_prompt: str = "",
+) -> None:
     """Dispatch one synthetic Telegram turn with a turn-local phone policy."""
     existing_prompt = (getattr(message, "channel_prompt", None) or "").strip()
     message.channel_prompt = "\n\n".join(
-        part for part in (_PHONE_DATA_CHANNEL_PROMPT, existing_prompt) if part
+        part for part in (
+            _PHONE_DATA_CHANNEL_PROMPT,
+            (persona_prompt or "").strip(),
+            existing_prompt,
+        ) if part
     )
     with _event_policy_scope(decision):
         try:
@@ -267,6 +273,7 @@ class PhoneEventAdapter:
         self._target_chat_type = str(extra.get("telegram_chat_type", "dm")).strip() or "dm"
         self._target_user_name = str(extra.get("telegram_user_name", "phone-agent")).strip()
         self._target_profile = str(extra.get("telegram_profile", "")).strip() or None
+        self._persona_prompt = str(extra.get("persona_prompt", "")).strip()
         self._serial = str(
             extra.get("serial") or os.environ.get("ANDROID_SERIAL", "")
         ).strip() or None
@@ -515,7 +522,13 @@ class PhoneEventAdapter:
         # this inbound-only adapter's handle_message() would make the base
         # class try to send the final response through phone_events.send().
         future = asyncio.run_coroutine_threadsafe(
-            _dispatch_with_event_policy(telegram_adapter, message, decision), loop,
+            _dispatch_with_event_policy(
+                telegram_adapter,
+                message,
+                decision,
+                getattr(self, "_persona_prompt", ""),
+            ),
+            loop,
         )
         future.add_done_callback(self._log_dispatch_result)
 

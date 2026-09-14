@@ -2744,6 +2744,26 @@ def test_task_source_channel_prompt_is_constant_and_describes_preapproval():
     assert "exactly one acknowledgement" in prompts[0]
 
 
+def test_phone_persona_prompt_is_added_without_replacing_safety_prompt():
+    prompts = []
+
+    class TelegramAdapter:
+        async def handle_message(self, event):
+            prompts.append(event.channel_prompt)
+
+    message = types.SimpleNamespace(channel_prompt="existing channel rule")
+    asyncio.run(event_adapter._dispatch_with_event_policy(
+        TelegramAdapter(),
+        message,
+        PolicyDecision(behavior="auto", instruction_source=True),
+        persona_prompt="Reply as the configured phone owner.",
+    ))
+
+    assert "host-generated [TASK_SOURCE]" in prompts[0]
+    assert "Reply as the configured phone owner." in prompts[0]
+    assert prompts[0].endswith("existing channel rule")
+
+
 def test_normal_process_death_is_not_classified_as_crash():
     line = (
         "09-11 19:11:27.188 692 1798 I ActivityManager: "

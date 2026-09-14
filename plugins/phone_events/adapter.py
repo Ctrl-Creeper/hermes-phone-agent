@@ -66,6 +66,102 @@ _NOTIFICATION_COUNT_SUFFIX = re.compile(
     r"\s*[\(\[（【]\s*\d+\s*(?:new\s+)?(?:messages?|条(?:新)?消息|則(?:新)?訊息)?\s*[\)\]）】]\s*$",
     re.IGNORECASE,
 )
+_FRIEND_REQUEST_BODIES = frozenset({
+    "add as friends",
+    "friend request",
+    "添加好友",
+    "请求添加你为朋友",
+    "申请添加你为好友",
+})
+
+
+def _wechat_friend_requester(phone_event: Any) -> Optional[str]:
+    """Return the named requester for an authenticated WeChat friend event."""
+    if (
+        getattr(phone_event, "event_type", "") != "notification"
+        or getattr(phone_event, "package", "") != _WECHAT_PACKAGE
+    ):
+        return None
+    body = " ".join(str(getattr(phone_event, "body", "") or "").split())
+    if body.casefold() not in _FRIEND_REQUEST_BODIES:
+        return None
+    requester = " ".join(str(getattr(phone_event, "title", "") or "").split())
+    if not requester or requester.casefold() in {"wechat", "微信"}:
+        return None
+    return requester
+
+
+def _accept_approved_friend_request(requester: str) -> str:
+    try:
+        from hermes_plugins.phone_use.tool import accept_approved_wechat_friend_request
+    except ImportError:
+        from plugins.phone_use.tool import accept_approved_wechat_friend_request
+    return accept_approved_wechat_friend_request(requester)
+
+
+def _wait_for_telegram_target(owner: Any, timeout: float = 60.0) -> bool:
+    """Wait off the gateway loop until the configured Telegram adapter is ready."""
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while time.monotonic() < deadline:
+        loop, telegram_adapter = owner._telegram_dispatch_target()
+        if (
+            loop is not None
+            and telegram_adapter is not None
+            and getattr(telegram_adapter, "is_connected", True) is not False
+        ):
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def _await_friend_request_approval(owner: Any, phone_event: Any) -> str:
+    """Use Hermes' existing Telegram approval FIFO without invoking an LLM."""
+    from gateway.config import Platform
+    from gateway.session import SessionSource
+    from tools import approval
+
+    if not _wait_for_telegram_target(owner):
+        logger.warning("Friend request approval timed out waiting for Telegram")
+        return "deny"
+
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id=owner._target_chat_id,
+        chat_type=owner._target_chat_type,
+        user_id=owner._target_user_id,
+        user_name=owner._target_user_name,
+        thread_id=owner._target_thread_id,
+        profile=getattr(owner, "_target_profile", None),
+    )
+    session_key = owner.gateway_runner._session_key_for_source(source)
+    requester = _wechat_friend_requester(phone_event) or "unknown"
+    body = str(getattr(phone_event, "body", "") or "").strip()
+    approval_data = {
+        "command": f"Accept WeChat friend request from {requester}",
+        "description": f"微信好友请求：{requester}（不设置备注）",
+        "pattern_key": f"phone_friend_request:{phone_event.meta.get('notification_key', requester)}",
+        "pattern_keys": [],
+        "allow_session": False,
+        "allow_permanent": False,
+    }
+
+    def notify(_approval_data: dict) -> None:
+        owner._dispatch_report_to_telegram("\n".join((
+            "👤 微信好友请求",
+            f"时间：{_event_time_text(phone_event.timestamp)}",
+            f"申请人：{requester}",
+            f"内容：{body}",
+            "",
+            "回复 /approve 接受，/deny 忽略。接受时不设置备注。",
+        )))
+
+    decision = approval._await_gateway_decision(
+        session_key,
+        notify,
+        approval_data,
+        surface="phone_friend_request",
+    )
+    return decision.get("choice") if decision.get("resolved") else "deny"
 
 
 def _normalized_conversation_title(value: Any) -> str:
@@ -364,6 +460,12 @@ class PhoneEventAdapter:
 
     def _on_raw_event(self, event) -> None:
         """Called from monitor threads. Policy check → filter → redact → dispatch."""
+        requester = _wechat_friend_requester(event)
+        if requester is not None:
+            if event.meta.get("_transport") == "helper_socket":
+                self._dispatch_friend_request_approval(event, requester)
+            return
+
         conversation_type = _effective_conversation_type(
             event,
             getattr(self, "_wechat_assume_unmentioned_private", False),
@@ -478,6 +580,48 @@ class PhoneEventAdapter:
             loop,
         )
         future.add_done_callback(self._log_report_result)
+
+    def _dispatch_friend_request_approval(self, event: Any, requester: str) -> None:
+        """Start a non-device-locking approval wait for one friend request."""
+        seen = getattr(self, "_friend_request_seen", None)
+        if seen is None:
+            self._friend_request_seen = seen = set()
+            self._friend_request_lock = threading.Lock()
+        key = str(event.meta.get("notification_key") or f"{requester}:{event.body}")
+        with self._friend_request_lock:
+            if key in seen:
+                return
+            if len(seen) >= 256:
+                seen.pop()
+            seen.add(key)
+        threading.Thread(
+            target=self._process_friend_request,
+            args=(event, requester),
+            daemon=True,
+            name="wechat-friend-approval",
+        ).start()
+
+    def _process_friend_request(self, event: Any, requester: str) -> None:
+        """Wait for approval, then enqueue the physical phone action."""
+        choice = _await_friend_request_approval(self, event)
+        if choice not in {"once", "session", "always"}:
+            self._dispatch_report_to_telegram(
+                f"已忽略来自 {requester} 的微信好友请求。"
+            )
+            return
+        raw_result = _accept_approved_friend_request(requester)
+        try:
+            result = json.loads(raw_result)
+        except (TypeError, json.JSONDecodeError):
+            result = {"ok": False, "message": str(raw_result)}
+        if result.get("ok"):
+            report = f"已接受 {requester} 的微信好友请求。"
+        else:
+            report = (
+                f"接受 {requester} 的微信好友请求失败："
+                f"{result.get('message') or result.get('error') or '未知错误'}"
+            )
+        self._dispatch_report_to_telegram(report)
 
     @staticmethod
     def _log_report_result(future) -> None:

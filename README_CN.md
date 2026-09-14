@@ -104,6 +104,10 @@ platforms:
 恢复导航错误；一旦尝试发送，就不会因为确认失败而再次发送，从而避免联网搜索后
 的长回复重复出现。
 
+经过认证的微信好友请求通知不会调用模型，而是直接发送到配置的 Telegram 目标。
+回复 `/approve` 可接受指定申请人且不设置备注，回复 `/deny` 则忽略。等待审批时
+不会占用手机操作队列，因此其他手机任务仍可继续执行。
+
 混合后端使用 ADB 执行快速操作（截图、点击、滑动、按键、应用管理），仅在需要 Unicode 文本输入或 ADB 的 `uiautomator dump` 失败时才懒加载启动 Appium。如果未安装 Appium，自动回退到纯 ADB。
 
 ## 脱离 Hermes 使用
@@ -144,7 +148,7 @@ platforms:
 ├────────────────────────────────────┼─────────────┤
 │  Android 模拟器                    │             │
 │  ┌───────────────────────────────────────────┐   │
-│  │  hermes-phone-agent-v0.2.3.apk           │   │
+│  │  hermes-phone-agent-v0.2.4.apk           │   │
 │  │  • NotificationListenerService            │   │
 │  │  • AccessibilityService                   │   │
 │  │  • BroadcastReceiver                      │   │

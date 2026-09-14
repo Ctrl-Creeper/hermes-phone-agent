@@ -183,6 +183,7 @@ class EventSocketService : Service(), EventBus.Listener {
                     ) {
                         client.authenticated = true
                         client.writeLine(JSONObject().put("type", "auth_ok").toString() + "\n")
+                        PhoneNotificationListener.replayPendingFriendRequests()
                         socket.soTimeout = 0  // Remove timeout after auth.
                         Log.i(TAG, "Client authenticated")
                     } else {

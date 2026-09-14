@@ -25,6 +25,10 @@ _SEARCH_RESULT_SECTIONS = frozenset({
     "mini programs", "小程序",
     "chat history", "聊天记录",
 })
+_CONTACT_LABELS = frozenset({"contacts", "通讯录"})
+_NEW_FRIENDS_LABELS = frozenset({"new friends", "新的朋友"})
+_ACCEPT_LABELS = frozenset({"accept", "接受", "添加"})
+_ADDED_LABELS = frozenset({"added", "accepted", "已添加", "已通过"})
 
 
 def _label(element: UIElement) -> str:
@@ -176,6 +180,36 @@ def _chat_is_open(capture: CaptureResult, chat: str) -> bool:
         not _is_search_page(capture)
         and _find_chat_header(capture, chat) is not None
         and _find_input(capture.elements) is not None
+    )
+
+
+def _find_label(
+    capture: CaptureResult,
+    labels: frozenset[str],
+    *,
+    min_y: int = 0,
+) -> Optional[UIElement]:
+    return next((
+        element for element in capture.elements
+        if element.bounds[1] >= min_y and _label(element).casefold() in labels
+    ), None)
+
+
+def _find_row_action(
+    capture: CaptureResult,
+    row: UIElement,
+    labels: frozenset[str],
+) -> Optional[UIElement]:
+    row_y = row.center()[1]
+    candidates = [
+        element for element in capture.elements
+        if _label(element).casefold() in labels
+        and abs(element.center()[1] - row_y) <= 140
+    ]
+    return min(
+        candidates,
+        key=lambda element: abs(element.center()[1] - row_y),
+        default=None,
     )
 
 
@@ -737,3 +771,148 @@ def reply(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
                     f"{result.message}; delivery was not retried after Home "
                     f"cleanup failed: {home.message}"
                 )
+
+
+def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult:
+    """Accept one named WeChat friend request and always return Home."""
+    requester = requester.strip()
+    result = ActionResult(
+        ok=False,
+        action="wechat_accept_friend",
+        message="WeChat friend request action did not run",
+        meta={"requester": requester},
+    )
+    try:
+        if not requester:
+            result.message = "requester is required"
+            return result
+
+        launched = _run_and_capture(
+            backend,
+            "launch_app",
+            lambda: backend.launch_app(WECHAT_PACKAGE),
+        )
+        if not launched.ok or launched.capture is None:
+            result.message = launched.message or "could not launch WeChat"
+            result.capture = launched.capture
+            return result
+        current = launched.capture
+
+        request_row = _find_text(current.elements, requester)
+        accept = (
+            _find_row_action(current, request_row, _ACCEPT_LABELS)
+            if request_row is not None else None
+        )
+        if accept is None:
+            contacts = _find_label(
+                current,
+                _CONTACT_LABELS,
+                min_y=int(current.height * 0.75),
+            )
+            for _ in range(3):
+                if contacts is not None:
+                    break
+                backed = _run_and_capture(
+                    backend, "keyevent", lambda: backend.keyevent("BACK"),
+                )
+                if not backed.ok or backed.capture is None:
+                    result.message = backed.message or "could not reach WeChat navigation"
+                    result.capture = backed.capture
+                    return result
+                current = backed.capture
+                contacts = _find_label(
+                    current,
+                    _CONTACT_LABELS,
+                    min_y=int(current.height * 0.75),
+                )
+            if contacts is None:
+                result.message = "WeChat Contacts tab was not found"
+                result.capture = current
+                return result
+
+            opened_contacts = _run_and_capture(
+                backend, "tap", lambda: backend.tap(element=contacts.index),
+            )
+            if not opened_contacts.ok or opened_contacts.capture is None:
+                result.message = opened_contacts.message or "could not open WeChat Contacts"
+                result.capture = opened_contacts.capture
+                return result
+            current = _settle_capture(
+                backend,
+                opened_contacts.capture,
+                lambda capture: _find_label(capture, _NEW_FRIENDS_LABELS) is not None,
+            )
+            new_friends = _find_label(current, _NEW_FRIENDS_LABELS)
+            if new_friends is None:
+                result.message = "WeChat New Friends entry was not found"
+                result.capture = current
+                return result
+
+            opened_requests = _run_and_capture(
+                backend, "tap", lambda: backend.tap(element=new_friends.index),
+            )
+            if not opened_requests.ok or opened_requests.capture is None:
+                result.message = opened_requests.message or "could not open New Friends"
+                result.capture = opened_requests.capture
+                return result
+            current = _settle_capture(
+                backend,
+                opened_requests.capture,
+                lambda capture: _find_text(capture.elements, requester) is not None,
+            )
+            request_row = _find_text(current.elements, requester)
+            if request_row is None:
+                result.message = f"friend request from {requester!r} was not found"
+                result.capture = current
+                return result
+            accept = _find_row_action(current, request_row, _ACCEPT_LABELS)
+
+        if accept is None or request_row is None:
+            result.message = f"Accept button for {requester!r} was not found"
+            result.capture = current
+            return result
+
+        accepted = _run_and_capture(
+            backend, "tap", lambda: backend.tap(element=accept.index),
+        )
+        if not accepted.ok or accepted.capture is None:
+            result.message = accepted.message or "WeChat Accept action failed"
+            result.capture = accepted.capture
+            return result
+        current = _settle_capture(
+            backend,
+            accepted.capture,
+            lambda capture: (
+                (row := _find_text(capture.elements, requester)) is not None
+                and (
+                    _find_row_action(capture, row, _ADDED_LABELS) is not None
+                    or _find_row_action(capture, row, _ACCEPT_LABELS) is None
+                )
+            ),
+        )
+        request_row = _find_text(current.elements, requester)
+        if request_row is None or _find_row_action(current, request_row, _ACCEPT_LABELS):
+            result.message = f"accepting friend request from {requester!r} could not be confirmed"
+            result.capture = current
+            return result
+
+        result = ActionResult(
+            ok=True,
+            action="wechat_accept_friend",
+            message=f"accepted WeChat friend request from {requester!r}",
+            capture=current,
+            meta={"requester": requester},
+        )
+        return result
+    except Exception as exc:
+        logger.exception("WeChat friend request action failed")
+        result.message = f"accepting WeChat friend request failed: {exc}"
+        return result
+    finally:
+        home = _run_and_capture(
+            backend, "keyevent", lambda: backend.keyevent("HOME"),
+        )
+        result.capture = home.capture or result.capture
+        if not home.ok:
+            result.ok = False
+            result.message = f"{result.message}; could not return to Home: {home.message}"

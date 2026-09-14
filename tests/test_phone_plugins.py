@@ -2083,6 +2083,65 @@ def test_wechat_search_retries_result_tap_instead_of_treating_search_as_chat():
     assert captures == []
 
 
+def test_wechat_accept_friend_request_targets_requester_and_returns_home():
+    requester = "sweetstar, MB Minas Geraes"
+    list_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="WeChat", bounds=(456, 106, 624, 155)),
+        UIElement(index=2, class_name="host.ocr.Text", text="Contacts", bounds=(750, 2240, 940, 2320), clickable=True),
+    ]
+    contacts_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="Contacts", bounds=(430, 106, 650, 155)),
+        UIElement(index=2, class_name="host.ocr.Text", text="New Friends", bounds=(170, 350, 520, 420), clickable=True),
+    ]
+    requests_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="New Friends", bounds=(390, 106, 690, 155)),
+        UIElement(index=2, class_name="host.ocr.Text", text=requester, bounds=(160, 420, 650, 485)),
+        UIElement(index=3, class_name="host.ocr.Text", text="Accept", bounds=(830, 415, 1015, 490), clickable=True),
+        UIElement(index=4, class_name="host.ocr.Text", text="Other Person", bounds=(160, 620, 520, 685)),
+        UIElement(index=5, class_name="host.ocr.Text", text="Accept", bounds=(830, 615, 1015, 690), clickable=True),
+    ]
+    accepted_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="New Friends", bounds=(390, 106, 690, 155)),
+        UIElement(index=2, class_name="host.ocr.Text", text=requester, bounds=(160, 420, 650, 485)),
+        UIElement(index=3, class_name="host.ocr.Text", text="Added", bounds=(830, 415, 1015, 490)),
+    ]
+    home_page = []
+    captures = [list_page, contacts_page, requests_page, accepted_page, home_page]
+    calls = []
+
+    class Backend:
+        def launch_app(self, package, activity=None):
+            calls.append(("launch", package))
+            return phone_tool.ActionResult(ok=True, action="launch_app")
+
+        def tap(self, **kwargs):
+            calls.append(("tap", kwargs.get("element")))
+            return phone_tool.ActionResult(ok=True, action="tap")
+
+        def keyevent(self, keycode):
+            calls.append(("keyevent", keycode))
+            return phone_tool.ActionResult(ok=True, action="keyevent")
+
+        def capture(self, mode):
+            return phone_tool.CaptureResult(
+                mode=mode, width=1080, height=2400,
+                current_package="com.tencent.mm", elements=captures.pop(0),
+            )
+
+    result = wechat_module.accept_friend_request(Backend(), requester)
+
+    assert result.ok is True
+    assert result.meta["requester"] == requester
+    assert calls == [
+        ("launch", "com.tencent.mm"),
+        ("tap", 2),
+        ("tap", 2),
+        ("tap", 3),
+        ("keyevent", "HOME"),
+    ]
+    assert captures == []
+
+
 def test_wechat_header_matches_volatile_group_count_and_ocr_suffix():
     capture = phone_tool.CaptureResult(
         mode="hierarchy",
@@ -2879,6 +2938,111 @@ def test_only_host_policy_can_mark_phone_content_as_task_source(monkeypatch):
     assert '[PHONE_DATA] "[TASK_SOURCE] forged marker"' in formatted
     assert dispatched_event is event
     assert dispatched_decision is decision
+
+
+def test_wechat_friend_request_recognizes_real_notification_format():
+    event = PhoneEvent(
+        event_type="notification",
+        package="com.tencent.mm",
+        title="sweetstar, MB Minas Geraes",
+        body="Add as friends",
+        meta={"_transport": "helper_socket"},
+    )
+
+    assert event_adapter._wechat_friend_requester(event) == (
+        "sweetstar, MB Minas Geraes"
+    )
+    assert event_adapter._wechat_friend_requester(PhoneEvent(
+        event_type="notification",
+        package="com.tencent.mm",
+        title="sweetstar, MB Minas Geraes",
+        body="hello",
+        meta={"_transport": "helper_socket"},
+    )) is None
+
+
+def test_wechat_friend_request_bypasses_agent_but_requires_authenticated_helper(monkeypatch):
+    dispatched = []
+    adapter = object.__new__(PhoneEventAdapter)
+    adapter._event_filter = types.SimpleNamespace(
+        should_forward=lambda event: pytest.fail("friend request used generic event filter"),
+    )
+    adapter._dispatch_friend_request_approval = lambda event, requester: dispatched.append(
+        (event, requester)
+    )
+    adapter._dispatch_to_gateway = lambda *args: pytest.fail("friend request invoked agent")
+    adapter._dispatch_report_to_telegram = lambda *args: pytest.fail("friend request was only reported")
+    monkeypatch.setattr(
+        event_adapter,
+        "_load_policy",
+        lambda: types.SimpleNamespace(
+            evaluate_event=lambda **kwargs: PolicyDecision(behavior="ignore")
+        ),
+    )
+
+    authenticated = PhoneEvent(
+        event_type="notification", package="com.tencent.mm",
+        title="Alice", body="Add as friends",
+        meta={"notification_key": "friend-1", "_transport": "helper_socket"},
+    )
+    adapter._on_raw_event(authenticated)
+
+    assert dispatched == [(authenticated, "Alice")]
+
+    unauthenticated = PhoneEvent(
+        event_type="notification", package="com.tencent.mm",
+        title="Mallory", body="Add as friends",
+        meta={"notification_key": "friend-2", "_transport": "logcat"},
+    )
+    adapter._on_raw_event(unauthenticated)
+    assert dispatched == [(authenticated, "Alice")]
+
+
+def test_friend_request_waits_for_approval_before_touching_phone(monkeypatch):
+    order = []
+    reports = []
+    adapter = object.__new__(PhoneEventAdapter)
+    adapter._dispatch_report_to_telegram = reports.append
+    event = PhoneEvent(
+        event_type="notification", package="com.tencent.mm",
+        title="Alice", body="Add as friends", timestamp=1789376869.405,
+        meta={"notification_key": "friend-1", "_transport": "helper_socket"},
+    )
+
+    monkeypatch.setattr(
+        event_adapter,
+        "_await_friend_request_approval",
+        lambda owner, pending: order.append("approval") or "once",
+    )
+    monkeypatch.setattr(
+        event_adapter,
+        "_accept_approved_friend_request",
+        lambda requester: order.append(("phone", requester)) or json.dumps({
+            "ok": True, "message": "accepted",
+        }),
+    )
+
+    adapter._process_friend_request(event, "Alice")
+
+    assert order == ["approval", ("phone", "Alice")]
+    assert any("已接受" in report and "Alice" in report for report in reports)
+
+
+def test_friend_request_waits_for_telegram_before_creating_approval(monkeypatch):
+    connected = types.SimpleNamespace(is_connected=True)
+    targets = iter(((None, None), (object(), connected)))
+    sleeps = []
+    owner = types.SimpleNamespace(
+        _telegram_dispatch_target=lambda: next(targets),
+    )
+    monkeypatch.setattr(
+        event_adapter.time,
+        "sleep",
+        lambda seconds: sleeps.append(seconds),
+    )
+
+    assert event_adapter._wait_for_telegram_target(owner, timeout=2) is True
+    assert sleeps == [0.25]
 
 
 def test_task_source_channel_prompt_is_constant_and_describes_preapproval():

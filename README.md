@@ -111,6 +111,12 @@ The included reply flow retries navigation failures before sending; after a
 send attempt it never resends an unconfirmed message, preventing duplicate
 long replies after web research.
 
+Authenticated WeChat friend-request notifications bypass the model and are
+reported directly to the configured Telegram destination. Reply `/approve` to
+accept the named requester without setting a remark, or `/deny` to ignore it.
+The approval wait does not hold the phone-operation queue, so ordinary phone
+tasks continue while the request is pending.
+
 The hybrid backend uses ADB for fast operations (screenshot, tap, swipe, keyevent, app management) and only starts Appium lazily when it needs Unicode text input or when ADB's `uiautomator dump` fails. If Appium is not installed, it falls back to pure ADB automatically.
 
 ## Using Without Hermes
@@ -151,7 +157,7 @@ Key points:
 ├────────────────────────────────────┼─────────────┤
 │  Android Emulator                  │             │
 │  ┌───────────────────────────────────────────┐   │
-│  │  hermes-phone-agent-v0.2.3.apk           │   │
+│  │  hermes-phone-agent-v0.2.4.apk           │   │
 │  │  • NotificationListenerService            │   │
 │  │  • AccessibilityService                   │   │
 │  │  • BroadcastReceiver                      │   │

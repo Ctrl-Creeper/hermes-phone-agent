@@ -25,6 +25,7 @@ from .backend import (
 from .policy import bind_event_policy, get_event_policy, get_policy
 from .wechat import open_chat as open_wechat_chat
 from .wechat import reply as reply_to_wechat
+from .wechat import accept_friend_request as accept_wechat_friend_request
 from .wechat_context import collect_context as collect_wechat_context
 
 logger = logging.getLogger(__name__)
@@ -937,6 +938,21 @@ def return_phone_home() -> None:
             _maybe_follow_capture(backend, res, True)
     except Exception:
         logger.exception("Could not return phone to Home after workflow")
+
+
+def accept_approved_wechat_friend_request(requester: str) -> str:
+    """Execute a host-approved friend request through the shared device FIFO."""
+    try:
+        backend = _get_backend()
+        with _device_operation_queue.turn("wechat_accept_friend"):
+            return _text_response(accept_wechat_friend_request(backend, requester))
+    except Exception as exc:
+        logger.exception("Approved WeChat friend request failed")
+        return json.dumps({
+            "ok": False,
+            "action": "wechat_accept_friend",
+            "message": f"accepting friend request failed: {exc}",
+        }, ensure_ascii=False)
 
 
 def _format_elements(elements: List[UIElement], max_lines: int = 40) -> List[str]:

@@ -19,6 +19,21 @@ import java.text.Normalizer
  */
 class PhoneNotificationListener : NotificationListenerService() {
 
+    override fun onCreate() {
+        super.onCreate()
+        activeInstance = this
+    }
+
+    override fun onDestroy() {
+        if (activeInstance === this) activeInstance = null
+        super.onDestroy()
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        replayActiveFriendRequests()
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         try {
             val notification = sbn.notification ?: return
@@ -90,6 +105,19 @@ class PhoneNotificationListener : NotificationListenerService() {
         private const val TAG = "HermesNotif"
         private const val WECHAT_PACKAGE = "com.tencent.mm"
         private const val EXTRA_IS_GROUP_CONVERSATION = "android.isGroupConversation"
+        private val FRIEND_REQUEST_TEXTS = setOf(
+            "Add as friends",
+            "Friend request",
+            "添加好友",
+            "请求添加你为朋友",
+            "申请添加你为好友",
+        )
+        @Volatile
+        private var activeInstance: PhoneNotificationListener? = null
+
+        fun replayPendingFriendRequests() {
+            activeInstance?.replayActiveFriendRequests()
+        }
         private val MESSAGE_COUNT_SUFFIX = Regex(
             """\s*[\(\[（【]\s*\d+\s*(?:new\s+)?(?:messages?|条(?:新)?消息|則(?:新)?訊息)?\s*[\)\]）】]\s*$""",
             RegexOption.IGNORE_CASE,
@@ -106,5 +134,19 @@ class PhoneNotificationListener : NotificationListenerService() {
             .getInstance("SHA-256")
             .digest(value.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
+
+        private fun notificationText(sbn: StatusBarNotification): String {
+            val extras = sbn.notification?.extras ?: return ""
+            return (
+                extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
+                    ?: extras.getCharSequence(Notification.EXTRA_TEXT)
+            )?.toString().orEmpty()
+        }
+    }
+
+    private fun replayActiveFriendRequests() {
+        activeNotifications
+            ?.filter { notificationText(it) in FRIEND_REQUEST_TEXTS }
+            ?.forEach(::onNotificationPosted)
     }
 }

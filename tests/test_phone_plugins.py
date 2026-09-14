@@ -2524,7 +2524,10 @@ def test_phone_event_lanes_isolate_wechat_conversations(monkeypatch):
 
     first = adapter._source_for_event(PhoneEvent(
         event_type="notification", package="com.tencent.mm",
-        title="项目群", meta={"conversation_title": "项目群"},
+        title="项目群", meta={
+            "conversation_title": "项目群",
+            "_transport": "helper_socket",
+        },
     ))
     second = adapter._source_for_event(PhoneEvent(
         event_type="notification", package="com.tencent.mm",
@@ -2539,6 +2542,8 @@ def test_phone_event_lanes_isolate_wechat_conversations(monkeypatch):
     assert build_session_key(first) == build_session_key(repeat)
     assert first.chat_id == second.chat_id == "123456789"
     assert first.thread_id is None
+    assert first.role_authorized is True
+    assert second.role_authorized is False
 
 
 def test_phone_event_lane_uses_stable_unknown_bucket(monkeypatch):

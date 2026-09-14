@@ -698,6 +698,13 @@ class PhoneEventAdapter:
             chat_name=chat_name,
             message_id=None,
             profile=getattr(self, "_target_profile", None),
+            # Authenticated helper events are not Telegram senders. Mark them
+            # adapter-authorized so later events in a busy lane are queued
+            # instead of being dropped by Telegram's sender authorization.
+            role_authorized=(
+                (getattr(phone_event, "meta", {}) or {}).get("_transport")
+                == "helper_socket"
+            ),
         )
 
     @staticmethod

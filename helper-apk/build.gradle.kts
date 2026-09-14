@@ -2,7 +2,7 @@
 //
 // Build: ./gradlew :app:assembleDebug
 // Output: app/build/outputs/apk/debug/app-debug.apk
-// Copy to releases/: cp app/build/outputs/apk/debug/app-debug.apk releases/hermes-phone-agent-v0.2.1.apk
+// Copy to releases/: cp app/build/outputs/apk/debug/app-debug.apk releases/hermes-phone-agent-v0.2.2.apk
 
 buildscript {
     repositories {

@@ -2178,6 +2178,105 @@ def test_socket_listener_preserves_notification_key_metadata():
     assert event.meta["_transport"] == "helper_socket"
 
 
+def test_socket_listener_preserves_wechat_conversation_metadata():
+    event = SocketListener._parse_helper_event({
+        "type": "notification",
+        "package": "com.tencent.mm",
+        "title": "项目群",
+        "body": "hello",
+        "timestamp": 1789122600.0,
+        "conversation_title": "项目群",
+        "conversation_key": "wechat-title-hash",
+    })
+
+    assert event is not None
+    assert event.meta["conversation_title"] == "项目群"
+    assert event.meta["conversation_key"] == "wechat-title-hash"
+
+
+def test_phone_event_lanes_isolate_wechat_conversations(monkeypatch):
+    hermes_source = Path.home() / ".hermes" / "hermes-agent"
+    if not hermes_source.is_dir():
+        pytest.skip("Hermes source is required for the platform integration test")
+    monkeypatch.syspath_prepend(str(hermes_source))
+
+    from gateway.config import Platform
+    from gateway.session import build_session_key
+
+    adapter = object.__new__(PhoneEventAdapter)
+    adapter._target_chat_id = "123456789"
+    adapter._target_chat_type = "dm"
+    adapter._target_user_id = "123456789"
+    adapter._target_user_name = "phone-agent"
+    adapter._target_thread_id = None
+    adapter._target_profile = None
+    adapter.gateway_runner = types.SimpleNamespace(
+        _gateway_loop=object(),
+        adapters={Platform.TELEGRAM: types.SimpleNamespace()},
+    )
+
+    first = adapter._source_for_event(PhoneEvent(
+        event_type="notification", package="com.tencent.mm",
+        title="项目群", meta={"conversation_title": "项目群"},
+    ))
+    second = adapter._source_for_event(PhoneEvent(
+        event_type="notification", package="com.tencent.mm",
+        title="家庭群", meta={"conversation_title": "家庭群"},
+    ))
+    repeat = adapter._source_for_event(PhoneEvent(
+        event_type="notification", package="com.tencent.mm",
+        title="项目群", meta={"conversation_title": "项目群"},
+    ))
+
+    assert build_session_key(first) != build_session_key(second)
+    assert build_session_key(first) == build_session_key(repeat)
+    assert first.chat_id == second.chat_id == "123456789"
+    assert first.thread_id is None
+
+
+def test_phone_event_lane_uses_stable_unknown_bucket(monkeypatch):
+    hermes_source = Path.home() / ".hermes" / "hermes-agent"
+    if not hermes_source.is_dir():
+        pytest.skip("Hermes source is required for the platform integration test")
+    monkeypatch.syspath_prepend(str(hermes_source))
+
+    adapter = object.__new__(PhoneEventAdapter)
+    adapter._target_chat_id = "123456789"
+    adapter._target_chat_type = "dm"
+    adapter._target_user_id = "123456789"
+    adapter._target_user_name = "phone-agent"
+    adapter._target_thread_id = None
+    adapter._target_profile = None
+
+    first = adapter._source_for_event(PhoneEvent(
+        event_type="notification", package="com.tencent.mm", body="one",
+    ))
+    second = adapter._source_for_event(PhoneEvent(
+        event_type="notification", package="com.tencent.mm", body="two",
+    ))
+
+    assert first.user_id == second.user_id
+    assert first.chat_name == second.chat_name == "WeChat (unknown conversation)"
+
+
+def test_wechat_lane_ignores_notification_count_but_honors_conversation_type():
+    base = PhoneEvent(
+        event_type="notification", package="com.tencent.mm",
+        title="项目群", meta={"conversation_type": "group"},
+    )
+    counted = PhoneEvent(
+        event_type="notification", package="com.tencent.mm",
+        title="项目群（2条新消息）", meta={"conversation_type": "group"},
+    )
+    private = PhoneEvent(
+        event_type="notification", package="com.tencent.mm",
+        title="项目群", meta={"conversation_type": "private"},
+    )
+
+    assert event_adapter._conversation_lane(base) == event_adapter._conversation_lane(counted)
+    assert event_adapter._conversation_lane(base) != event_adapter._conversation_lane(private)
+
+
 def test_automatic_phone_turn_uses_isolated_telegram_session(monkeypatch):
     hermes_source = Path.home() / ".hermes" / "hermes-agent"
     if not hermes_source.is_dir():
@@ -2215,7 +2314,15 @@ def test_automatic_phone_turn_uses_isolated_telegram_session(monkeypatch):
     monkeypatch.setattr("asyncio.run_coroutine_threadsafe", submit)
     monkeypatch.setattr(event_adapter, "_return_phone_home", lambda: None)
 
-    adapter._dispatch_to_gateway("phone event", object())
+    adapter._dispatch_to_gateway(
+        "phone event",
+        PhoneEvent(
+            event_type="notification",
+            package="com.tencent.mm",
+            title="项目群",
+            meta={"conversation_title": "项目群"},
+        ),
+    )
 
     ordinary = SessionSource(
         platform=Platform.TELEGRAM,
@@ -2224,8 +2331,9 @@ def test_automatic_phone_turn_uses_isolated_telegram_session(monkeypatch):
         user_id="123456789",
     )
     assert received[0].source.chat_id == ordinary.chat_id
-    assert received[0].source.thread_id == "1"
-    assert build_session_key(received[0].source).endswith(":123456789:1")
+    assert received[0].source.thread_id is None
+    assert received[0].source.chat_name == "WeChat: 项目群"
+    assert ":group:123456789:" in build_session_key(received[0].source)
     assert build_session_key(received[0].source) != build_session_key(ordinary)
 
 

@@ -144,7 +144,7 @@ platforms:
 ├────────────────────────────────────┼─────────────┤
 │  Android 模拟器                    │             │
 │  ┌───────────────────────────────────────────┐   │
-│  │  phone-agent-helper.apk                   │   │
+│  │  hermes-phone-agent-v0.2.1.apk           │   │
 │  │  • NotificationListenerService            │   │
 │  │  • AccessibilityService                   │   │
 │  │  • BroadcastReceiver                      │   │

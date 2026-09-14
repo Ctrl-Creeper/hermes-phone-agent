@@ -1,8 +1,8 @@
-// Top-level build file for phone-agent-helper APK.
+// Top-level build file for the Hermes Phone Agent APK.
 //
 // Build: ./gradlew :app:assembleDebug
 // Output: app/build/outputs/apk/debug/app-debug.apk
-// Copy to releases/: cp app/build/outputs/apk/debug/app-debug.apk releases/phone-agent-helper.apk
+// Copy to releases/: cp app/build/outputs/apk/debug/app-debug.apk releases/hermes-phone-agent-v0.2.1.apk
 
 buildscript {
     repositories {

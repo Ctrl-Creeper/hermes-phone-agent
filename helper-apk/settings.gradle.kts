@@ -15,5 +15,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "phone-agent-helper"
+rootProject.name = "hermes-phone-agent"
 include(":app")

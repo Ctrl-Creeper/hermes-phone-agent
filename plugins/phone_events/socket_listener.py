@@ -74,7 +74,9 @@ class SocketListener:
         if not self.is_available:
             logger.info(
                 "Helper APK (%s) not installed — Tier 2 events disabled. "
-                "Install it with: adb install helper-apk/releases/phone-agent-helper.apk",
+                "Install Hermes Phone Agent v0.2.1 from: "
+                "https://github.com/Ctrl-Creeper/hermes-phone-agent/"
+                "releases/tag/v0.2.1",
                 _HELPER_PACKAGE,
             )
             return

@@ -151,7 +151,7 @@ Key points:
 ├────────────────────────────────────┼─────────────┤
 │  Android Emulator                  │             │
 │  ┌───────────────────────────────────────────┐   │
-│  │  hermes-phone-agent-v0.2.2.apk           │   │
+│  │  hermes-phone-agent-v0.2.3.apk           │   │
 │  │  • NotificationListenerService            │   │
 │  │  • AccessibilityService                   │   │
 │  │  • BroadcastReceiver                      │   │

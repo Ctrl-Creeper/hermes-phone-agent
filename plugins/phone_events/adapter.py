@@ -71,6 +71,23 @@ def _normalized_conversation_title(value: Any) -> str:
     return _NOTIFICATION_COUNT_SUFFIX.sub("", text).strip()
 
 
+def _effective_conversation_type(phone_event: Any, assume_muted_groups: bool) -> str:
+    """Classify a WeChat notification, optionally using the muted-groups contract."""
+    meta = getattr(phone_event, "meta", {}) or {}
+    kind = str(meta.get("conversation_type") or "unknown").strip().casefold()
+    if kind in {"group", "private"}:
+        return kind
+    if not assume_muted_groups:
+        return "unknown"
+    if (
+        getattr(phone_event, "event_type", "") != "notification"
+        or getattr(phone_event, "package", "") != _WECHAT_PACKAGE
+    ):
+        return "unknown"
+    text = f"{getattr(phone_event, 'title', '')}\n{getattr(phone_event, 'body', '')}"
+    return "unknown" if "@" in text else "private"
+
+
 def _conversation_lane(phone_event: Any) -> tuple[str, str]:
     """Return a stable session identity and a human-readable conversation name."""
     package = str(getattr(phone_event, "package", "") or "unknown").strip()
@@ -257,6 +274,11 @@ class PhoneEventAdapter:
         self._raw_notifications = raw_notifications is True or str(
             raw_notifications
         ).strip().casefold() in {"true", "1", "yes"}
+        assume_muted_groups = extra.get("wechat_assume_unmentioned_private", False)
+        self._wechat_assume_unmentioned_private = (
+            assume_muted_groups is True
+            or str(assume_muted_groups).strip().casefold() in {"true", "1", "yes"}
+        )
 
     def set_message_callback(self, callback) -> None:
         """Set the callback for injecting events into the gateway."""
@@ -332,6 +354,16 @@ class PhoneEventAdapter:
 
     def _on_raw_event(self, event) -> None:
         """Called from monitor threads. Policy check → filter → redact → dispatch."""
+        conversation_type = _effective_conversation_type(
+            event,
+            getattr(self, "_wechat_assume_unmentioned_private", False),
+        )
+        if conversation_type != str(
+            event.meta.get("conversation_type") or "unknown"
+        ).strip().casefold():
+            event.meta["conversation_type"] = conversation_type
+            event.meta["_conversation_type_inferred"] = True
+
         # Policy enforcement: check behavior before processing.
         policy = _load_policy()
         decision = None
@@ -341,6 +373,7 @@ class PhoneEventAdapter:
                 event_type=event.event_type,
                 title=event.title,
                 body=event.body,
+                conversation_type=conversation_type,
             )
             if (
                 decision.is_auto

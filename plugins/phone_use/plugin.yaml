@@ -1,7 +1,7 @@
 name: phone-use
 label: Phone Control (ADB / Appium Hybrid)
 kind: standalone
-version: 0.2.0
+version: 0.2.1
 description: >
   Control a virtual Android phone via ADB — screenshots, tap, swipe,
   type text, press keys, launch/stop apps, read UI hierarchy. Works with

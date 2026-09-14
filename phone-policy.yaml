@@ -38,6 +38,7 @@
 #     match:
 #       event: notification | app_switch | crash | toast | ui_change | broadcast
 #       package: "exact.package" or "com.example.*" (glob)
+#       conversation_type: private | group | unknown
 #       title_regex: "pattern"   — regex matched against event title
 #       body_regex: "pattern"    — regex matched against event body
 #     behavior: auto | report | ignore

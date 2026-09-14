@@ -34,7 +34,9 @@ class PhoneNotificationListener : NotificationListenerService() {
                 ""
             }
             val conversationType = if (sbn.packageName == WECHAT_PACKAGE) {
-                if (extras.getBoolean(EXTRA_IS_GROUP_CONVERSATION, false)) {
+                if (!extras.containsKey(EXTRA_IS_GROUP_CONVERSATION)) {
+                    "unknown"
+                } else if (extras.getBoolean(EXTRA_IS_GROUP_CONVERSATION, false)) {
                     "group"
                 } else {
                     "private"

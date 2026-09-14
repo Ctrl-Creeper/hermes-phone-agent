@@ -16,7 +16,7 @@ set -euo pipefail
 HELPER_PACKAGE="com.hermes.phoneagent"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILT_APK_PATH="${SCRIPT_DIR}/helper-apk/app/build/outputs/apk/debug/app-debug.apk"
-RELEASE_APK_PATH="${SCRIPT_DIR}/helper-apk/releases/hermes-phone-agent-v0.2.2.apk"
+RELEASE_APK_PATH="${SCRIPT_DIR}/helper-apk/releases/hermes-phone-agent-v0.2.3.apk"
 if [[ -f "$BUILT_APK_PATH" ]]; then
     APK_PATH="$BUILT_APK_PATH"
 else
@@ -68,7 +68,7 @@ if [[ ! -f "$APK_PATH" ]]; then
     echo "   APK not found at: $APK_PATH"
     echo "   Build it first:"
     echo "     cd helper-apk && ./gradlew :app:assembleDebug"
-    echo "     cp app/build/outputs/apk/debug/app-debug.apk releases/hermes-phone-agent-v0.2.2.apk"
+    echo "     cp app/build/outputs/apk/debug/app-debug.apk releases/hermes-phone-agent-v0.2.3.apk"
     exit 1
 fi
 $ADB_CMD install -r "$APK_PATH"

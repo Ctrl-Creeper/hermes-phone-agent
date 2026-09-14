@@ -62,6 +62,7 @@ class EventRule:
     package: str = ""
     package_regex: Optional[re.Pattern] = field(default=None, compare=False, repr=False)
     event_type: str = ""
+    conversation_type: str = ""
     title_regex: Optional[re.Pattern] = field(default=None, compare=False, repr=False)
     body_regex: Optional[re.Pattern] = field(default=None, compare=False, repr=False)
     behavior: str = BEHAVIOR_REPORT
@@ -151,11 +152,14 @@ class PhonePolicy:
         event_type: str = "",
         title: str = "",
         body: str = "",
+        conversation_type: str = "",
     ) -> PolicyDecision:
         """Match an event against rules and profiles, return the decision."""
         # Tier 1: event_rules (fine-grained, priority-ordered)
         for rule in self.event_rules:
-            if self._event_rule_matches(rule, package, event_type, title, body):
+            if self._event_rule_matches(
+                rule, package, event_type, title, body, conversation_type,
+            ):
                 return PolicyDecision(
                     behavior=rule.behavior,
                     blocked_actions=rule.blocked_actions,
@@ -230,6 +234,7 @@ class PhonePolicy:
         event_type: str,
         title: str,
         body: str,
+        conversation_type: str,
     ) -> bool:
         # Package match
         if rule.package:
@@ -240,6 +245,8 @@ class PhonePolicy:
                 return False
         # Event type match
         if rule.event_type and rule.event_type != event_type:
+            return False
+        if rule.conversation_type and rule.conversation_type != conversation_type:
             return False
         # Title regex match
         if rule.title_regex and not rule.title_regex.search(title):
@@ -305,6 +312,7 @@ def _parse_config(raw: Dict[str, Any]) -> PhonePolicy:
         pkg_regex = _compile_glob(pkg) if pkg else None
 
         event = match.get("event", "")
+        conversation_type = str(match.get("conversation_type", "")).strip().casefold()
         title_rx = _compile_regex(match["title_regex"], f"rule {i} title_regex") if match.get("title_regex") else None
         body_rx = _compile_regex(match["body_regex"], f"rule {i} body_regex") if match.get("body_regex") else None
 
@@ -317,6 +325,7 @@ def _parse_config(raw: Dict[str, Any]) -> PhonePolicy:
             package=pkg,
             package_regex=pkg_regex,
             event_type=event,
+            conversation_type=conversation_type,
             title_regex=title_rx,
             body_regex=body_rx,
             behavior=behavior,

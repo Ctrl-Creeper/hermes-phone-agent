@@ -2110,6 +2110,29 @@ def test_instruction_source_is_carried_from_config_to_event_decision():
     assert decision.instruction_source is True
 
 
+def test_phone_adapter_passes_conversation_type_to_policy(monkeypatch):
+    evaluated = []
+    policy = types.SimpleNamespace(
+        evaluate_event=lambda **kwargs: evaluated.append(kwargs)
+        or PolicyDecision(behavior="ignore"),
+    )
+    adapter = object.__new__(PhoneEventAdapter)
+    adapter._event_filter = types.SimpleNamespace(
+        should_forward=lambda event: pytest.fail("ignored event reached filter"),
+    )
+    monkeypatch.setattr(event_adapter, "_load_policy", lambda: policy)
+
+    adapter._on_raw_event(PhoneEvent(
+        event_type="notification",
+        package="com.tencent.mm",
+        title="Alice",
+        body="hello",
+        meta={"conversation_type": "private", "_transport": "helper_socket"},
+    ))
+
+    assert evaluated[0]["conversation_type"] == "private"
+
+
 def test_ignored_phone_event_does_not_consume_event_filter_capacity(monkeypatch):
     calls = []
     decision = PolicyDecision(behavior="ignore")
@@ -2275,6 +2298,96 @@ def test_wechat_lane_ignores_notification_count_but_honors_conversation_type():
 
     assert event_adapter._conversation_lane(base) == event_adapter._conversation_lane(counted)
     assert event_adapter._conversation_lane(base) != event_adapter._conversation_lane(private)
+
+
+def test_policy_can_match_private_wechat_conversation_type():
+    policy = _parse_config({
+        "default_behavior": "report",
+        "event_rules": [{
+            "match": {
+                "package": "com.tencent.mm",
+                "event": "notification",
+                "conversation_type": "private",
+            },
+            "behavior": "auto",
+            "instruction_source": True,
+            "priority": 20,
+        }],
+    })
+
+    private = policy.evaluate_event(
+        package="com.tencent.mm", event_type="notification",
+        title="Alice", body="在吗", conversation_type="private",
+    )
+    group = policy.evaluate_event(
+        package="com.tencent.mm", event_type="notification",
+        title="项目群", body="普通群消息", conversation_type="group",
+    )
+    unknown = policy.evaluate_event(
+        package="com.tencent.mm", event_type="notification",
+        title="项目群", body="普通群消息", conversation_type="unknown",
+    )
+
+    assert private.is_auto and private.instruction_source
+    assert group.is_report
+    assert unknown.is_report
+
+
+def test_at_trigger_still_wins_for_group_conversation():
+    policy = _parse_config({
+        "default_behavior": "report",
+        "event_rules": [
+            {
+                "match": {
+                    "package": "com.tencent.mm",
+                    "event": "notification",
+                    "body_regex": "(?i)@phone_agent",
+                },
+                "behavior": "auto",
+                "instruction_source": True,
+                "priority": 30,
+            },
+            {
+                "match": {
+                    "package": "com.tencent.mm",
+                    "event": "notification",
+                    "conversation_type": "private",
+                },
+                "behavior": "auto",
+                "instruction_source": True,
+                "priority": 20,
+            },
+        ],
+    })
+
+    decision = policy.evaluate_event(
+        package="com.tencent.mm", event_type="notification",
+        title="项目群", body="Alice: @phone_agent 在吗",
+        conversation_type="group",
+    )
+
+    assert decision.is_auto and decision.instruction_source
+
+
+def test_muted_group_mode_infers_only_unclassified_unmentioned_wechat_as_private():
+    plain = PhoneEvent(
+        event_type="notification", package="com.tencent.mm",
+        title="Alice", body="在吗", meta={"conversation_type": "unknown"},
+    )
+    mentioned = PhoneEvent(
+        event_type="notification", package="com.tencent.mm",
+        title="项目群", body="Alice: @phone_agent 在吗",
+        meta={"conversation_type": "unknown"},
+    )
+    group = PhoneEvent(
+        event_type="notification", package="com.tencent.mm",
+        title="项目群", body="普通群消息", meta={"conversation_type": "group"},
+    )
+
+    assert event_adapter._effective_conversation_type(plain, True) == "private"
+    assert event_adapter._effective_conversation_type(plain, False) == "unknown"
+    assert event_adapter._effective_conversation_type(mentioned, True) == "unknown"
+    assert event_adapter._effective_conversation_type(group, True) == "group"
 
 
 def test_automatic_phone_turn_uses_isolated_telegram_session(monkeypatch):

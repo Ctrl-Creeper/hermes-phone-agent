@@ -110,7 +110,7 @@ def collect_context(
     max_messages: int = 50,
     max_pages: int = 8,
     max_minutes: int = 10,
-    include_images: bool = False,
+    include_images: bool = True,
 ) -> ActionResult:
     try:
         effective = parse_collection_scope(

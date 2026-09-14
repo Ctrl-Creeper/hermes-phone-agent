@@ -2024,10 +2024,11 @@ def test_wechat_context_collection_stops_on_repeated_page(monkeypatch):
 
 
 def test_wechat_context_action_returns_structured_collection(monkeypatch):
-    monkeypatch.setattr(
-        phone_tool,
-        "collect_wechat_context",
-        lambda backend, chat, **kwargs: phone_tool.ActionResult(
+    observed = {}
+
+    def collect(backend, chat, **kwargs):
+        observed.update(kwargs)
+        return phone_tool.ActionResult(
             ok=True,
             action="wechat_collect_context",
             message="collected context",
@@ -2039,7 +2040,12 @@ def test_wechat_context_action_returns_structured_collection(monkeypatch):
                 "stop_reason": "message_limit",
                 "screenshots": [],
             },
-        ),
+        )
+
+    monkeypatch.setattr(
+        phone_tool,
+        "collect_wechat_context",
+        collect,
     )
 
     result = json.loads(phone_tool._dispatch(
@@ -2051,6 +2057,54 @@ def test_wechat_context_action_returns_structured_collection(monkeypatch):
     assert result["ok"] is True
     assert result["lines"] == ["第一条", "第二条"]
     assert result["stop_reason"] == "message_limit"
+    assert observed["include_images"] is True
+
+
+def test_wechat_context_action_can_explicitly_disable_images(monkeypatch):
+    observed = {}
+
+    def collect(backend, chat, **kwargs):
+        observed.update(kwargs)
+        return phone_tool.ActionResult(
+            ok=True, action="wechat_collect_context", meta={"screenshots": []},
+        )
+
+    monkeypatch.setattr(phone_tool, "collect_wechat_context", collect)
+
+    phone_tool._dispatch(
+        object(), "wechat_collect_context",
+        {"chat": "群聊", "include_images": False},
+    )
+
+    assert observed["include_images"] is False
+
+
+def test_wechat_context_screenshots_reach_model_as_multimodal_result(monkeypatch):
+    monkeypatch.setattr(
+        phone_tool,
+        "collect_wechat_context",
+        lambda backend, chat, **kwargs: phone_tool.ActionResult(
+            ok=True,
+            action="wechat_collect_context",
+            message="collected context",
+            meta={
+                "chat": chat,
+                "lines": ["[image]"],
+                "screenshots": ["ZmFrZS1wbmc="],
+            },
+        ),
+    )
+
+    result = phone_tool._dispatch(
+        object(), "wechat_collect_context", {"chat": "群聊"},
+    )
+
+    assert result["_multimodal"] is True
+    assert result["meta"]["image_count"] == 1
+    assert result["content"][1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,ZmFrZS1wbmc="},
+    }
 
 
 def test_wechat_reply_returns_home_when_chat_cannot_be_found():

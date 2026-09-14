@@ -153,7 +153,8 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                 "type": "boolean",
                 "description": (
                     "Return up to five full-page screenshots for visual "
-                    "analysis. Never opens uncertain image bubbles."
+                    "analysis (default true). Set false only when the request "
+                    "is explicitly text-only. Never opens uncertain image bubbles."
                 ),
             },
             "keycode": {

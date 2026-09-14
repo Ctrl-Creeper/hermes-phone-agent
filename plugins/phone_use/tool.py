@@ -10,6 +10,8 @@ import logging
 import os
 import threading
 import time
+from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -81,6 +83,45 @@ _workflow_lock = threading.Lock()
 _workflow_scopes: Dict[tuple[str, str], WorkflowScope] = {}
 _reply_result_lock = threading.Lock()
 _reply_results: Dict[tuple[str, str, str, str], str] = {}
+
+
+class DeviceOperationQueue:
+    """Fairly serialize physical operations against the shared phone."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._waiting = deque()
+        self._active = False
+
+    @contextmanager
+    def turn(self, action: str, task_id: str = "", session_id: str = ""):
+        token = object()
+        with self._condition:
+            self._waiting.append(token)
+            position = len(self._waiting) + int(self._active)
+            if position > 1:
+                logger.info(
+                    "phone device queue: queued action=%s position=%d task=%s session=%s",
+                    action, position, task_id or "-", session_id or "-",
+                )
+            while self._active or self._waiting[0] is not token:
+                self._condition.wait()
+            self._waiting.popleft()
+            self._active = True
+
+        logger.info(
+            "phone device queue: starting action=%s task=%s session=%s",
+            action, task_id or "-", session_id or "-",
+        )
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._active = False
+                self._condition.notify_all()
+
+
+_device_operation_queue = DeviceOperationQueue()
 
 _session_auto_approve = False
 _always_allow: set = set()
@@ -436,32 +477,28 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
                 "hint": "Edit phone-policy.yaml to change this rule.",
             }), task_id, session_id, workflow_active)
 
-    try:
-        result = _dispatch(backend, action, args)
-        if trusted_auto_wechat_reply:
-            _remember_reply_result(
-                task_id,
-                session_id,
-                args.get("chat", ""),
-                args.get("text", ""),
-                result,
+    with _device_operation_queue.turn(action, task_id, session_id):
+        try:
+            result = _dispatch(backend, action, args)
+        except ValueError as e:
+            result = _error_response_with_capture(backend, action, str(e))
+        except Exception as e:
+            logger.exception("phone_use %s failed", action)
+            result = _error_response_with_capture(
+                backend, action, f"{action} failed: {e}",
             )
-        return _finish_failed_workflow(
-            result, task_id, session_id, workflow_active,
+
+    if trusted_auto_wechat_reply:
+        _remember_reply_result(
+            task_id,
+            session_id,
+            args.get("chat", ""),
+            args.get("text", ""),
+            result,
         )
-    except ValueError as e:
-        result = _error_response_with_capture(backend, action, str(e))
-        return _finish_failed_workflow(
-            result, task_id, session_id, workflow_active,
-        )
-    except Exception as e:
-        logger.exception("phone_use %s failed", action)
-        result = _error_response_with_capture(
-            backend, action, f"{action} failed: {e}",
-        )
-        return _finish_failed_workflow(
-            result, task_id, session_id, workflow_active,
-        )
+    return _finish_failed_workflow(
+        result, task_id, session_id, workflow_active,
+    )
 
 
 def _request_approval(
@@ -895,8 +932,9 @@ def return_phone_home() -> None:
     """Best-effort workflow cleanup used by the phone event adapter."""
     try:
         backend = _get_backend()
-        res = backend.keyevent("HOME")
-        _maybe_follow_capture(backend, res, True)
+        with _device_operation_queue.turn("return_home"):
+            res = backend.keyevent("HOME")
+            _maybe_follow_capture(backend, res, True)
     except Exception:
         logger.exception("Could not return phone to Home after workflow")
 

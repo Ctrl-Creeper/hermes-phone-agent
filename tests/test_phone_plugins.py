@@ -1091,6 +1091,120 @@ def test_authenticated_task_reply_is_idempotent_within_one_turn(monkeypatch):
     assert len(dispatched) == 1
 
 
+def test_phone_actions_run_in_fifo_order_across_sessions(monkeypatch):
+    decision = PolicyDecision(
+        behavior="auto",
+        allowed_actions=frozenset({"wechat_reply"}),
+        instruction_source=True,
+    )
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    order = []
+
+    def dispatch(_backend, _action, args):
+        text = args["text"]
+        order.append(("start", text))
+        if text == "first":
+            first_started.set()
+            assert release_first.wait(timeout=2)
+        else:
+            second_started.set()
+        order.append(("end", text))
+        return json.dumps({"ok": True})
+
+    def run(text, task_id):
+        with phone_tool.bind_event_policy(decision):
+            phone_tool.handle_phone_use(
+                {"action": "wechat_reply", "chat": "Example Chat", "text": text},
+                task_id=task_id,
+                session_id=f"session:{task_id}",
+            )
+
+    phone_tool.reset_backend_for_tests()
+    monkeypatch.setattr(phone_tool, "_get_backend", lambda: object())
+    monkeypatch.setattr(phone_tool, "_dispatch", dispatch)
+    first = threading.Thread(target=run, args=("first", "turn-1"), daemon=True)
+    second = threading.Thread(target=run, args=("second", "turn-2"), daemon=True)
+
+    first.start()
+    assert first_started.wait(timeout=1)
+    second.start()
+    assert not second_started.wait(timeout=0.1)
+    release_first.set()
+    first.join(timeout=1)
+    second.join(timeout=1)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert order == [
+        ("start", "first"),
+        ("end", "first"),
+        ("start", "second"),
+        ("end", "second"),
+    ]
+
+
+def test_phone_queue_continues_after_a_failed_action(monkeypatch):
+    decision = PolicyDecision(
+        behavior="auto",
+        allowed_actions=frozenset({"wechat_reply"}),
+        instruction_source=True,
+    )
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    calls = []
+
+    def dispatch(_backend, _action, args):
+        calls.append(args["text"])
+        if args["text"] == "first":
+            first_started.set()
+            assert release_first.wait(timeout=2)
+            raise RuntimeError("first action failed")
+        second_started.set()
+        return json.dumps({"ok": True})
+
+    def run(text, task_id):
+        with phone_tool.bind_event_policy(decision):
+            return phone_tool.handle_phone_use(
+                {"action": "wechat_reply", "chat": "Example Chat", "text": text},
+                task_id=task_id,
+                session_id=f"session:{task_id}",
+            )
+
+    class Backend:
+        def capture(self, mode):
+            return phone_tool.CaptureResult(mode=mode, width=1080, height=2400)
+
+    phone_tool.reset_backend_for_tests()
+    monkeypatch.setattr(phone_tool, "_get_backend", lambda: Backend())
+    monkeypatch.setattr(phone_tool, "_dispatch", dispatch)
+
+    results = {}
+
+    def store_result(text, task_id):
+        results[text] = run(text, task_id)
+
+    first_thread = threading.Thread(
+        target=store_result, args=("first", "turn-1"), daemon=True,
+    )
+    second_thread = threading.Thread(
+        target=store_result, args=("second", "turn-2"), daemon=True,
+    )
+    first_thread.start()
+    assert first_started.wait(timeout=1)
+    second_thread.start()
+    assert not second_started.wait(timeout=0.1)
+    release_first.set()
+    first_thread.join(timeout=1)
+    second_thread.join(timeout=1)
+
+    assert json.loads(results["first"])["ok"] is False
+    assert json.loads(results["second"])["ok"] is True
+    assert calls == ["first", "second"]
+
+
 def test_phone_use_registers_turn_end_workflow_cleanup_hook():
     from plugins import phone_use
 
@@ -1909,6 +2023,63 @@ def test_wechat_open_chat_searches_when_chat_is_not_visible():
 
     assert result.ok is True
     assert calls == [("tap", 2), ("set_text", "Example Group"), ("tap", 2)]
+    assert captures == []
+
+
+def test_wechat_search_retries_result_tap_instead_of_treating_search_as_chat():
+    list_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="WeChat", bounds=(456, 106, 624, 155)),
+        UIElement(index=2, class_name="host.ocr.WeChatSearch", text="[WeChat search]", bounds=(840, 80, 960, 190), clickable=True),
+        *[
+            UIElement(index=10 + index, class_name="host.ocr.Text", text=f"other {index}", bounds=(200, 300 + index * 80, 500, 350 + index * 80))
+            for index in range(8)
+        ],
+    ]
+    search_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="Search local or internet results", bounds=(180, 120, 820, 190)),
+    ]
+    results_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="Example User", bounds=(320, 104, 756, 157)),
+        UIElement(index=2, class_name="host.ocr.Text", text="Contacts", bounds=(41, 291, 255, 333)),
+        UIElement(index=3, class_name="host.ocr.Text", text="Example User", bounds=(188, 425, 568, 472), clickable=True),
+        UIElement(index=4, class_name="host.ocr.MessageInput", text="[WeChat message input]", bounds=(110, 2165, 720, 2325)),
+    ]
+    target_chat = [
+        UIElement(index=1, class_name="host.ocr.Text", text="Example User", bounds=(320, 104, 756, 157)),
+        UIElement(index=2, class_name="host.ocr.MessageInput", text="[WeChat message input]", bounds=(110, 2165, 720, 2325)),
+    ]
+    captures = [list_page, search_page, results_page, results_page, target_chat]
+    calls = []
+
+    class Backend:
+        def launch_app(self, package, activity=None):
+            return phone_tool.ActionResult(ok=True, action="launch_app")
+
+        def tap(self, **kwargs):
+            calls.append(("tap", kwargs.get("element")))
+            return phone_tool.ActionResult(ok=True, action="tap")
+
+        def set_text(self, text, element=None):
+            calls.append(("set_text", text))
+            return phone_tool.ActionResult(ok=True, action="set_text")
+
+        def capture(self, mode):
+            return phone_tool.CaptureResult(
+                mode=mode, width=1080, height=2400,
+                current_package="com.tencent.mm", elements=captures.pop(0),
+            )
+
+    from plugins.phone_use.wechat import open_chat
+
+    result = open_chat(Backend(), "Example User")
+
+    assert result.ok is True
+    assert calls == [
+        ("tap", 2),
+        ("set_text", "Example User"),
+        ("tap", 3),
+        ("tap", 3),
+    ]
     assert captures == []
 
 

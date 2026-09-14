@@ -18,6 +18,13 @@ _SEND_LABELS = frozenset({"发送", "send", "发送消息", "send message"})
 _VOICE_INPUT_LABELS = frozenset({"hold to talk", "按住说话"})
 _VOICE_TRANSCRIPTION_PREFIXES = ("tap to convert to text", "轻触转文字")
 _MIN_TITLE_SIMILARITY = 0.80
+_SEARCH_RESULT_SECTIONS = frozenset({
+    "contacts", "联系人",
+    "group chats", "群聊",
+    "official accounts", "公众号",
+    "mini programs", "小程序",
+    "chat history", "聊天记录",
+})
 
 
 def _label(element: UIElement) -> str:
@@ -133,11 +140,16 @@ def _find_search_control(capture: CaptureResult) -> Optional[UIElement]:
 
 def _is_search_page(capture: CaptureResult) -> bool:
     labels = " ".join(_label(element).casefold() for element in capture.elements)
-    return (
+    title_limit = max(220, int(capture.height * 0.12))
+    has_result_section = any(
+        element.bounds[1] >= title_limit
+        and element.bounds[1] < int(capture.height * 0.7)
+        and _label(element).casefold() in _SEARCH_RESULT_SECTIONS
+        for element in capture.elements
+    )
+    return has_result_section or (
         "search local or internet results" in labels
         or "搜索本地或互联网结果" in labels
-        or "group chats" in labels
-        or "群聊" in labels
     )
 
 
@@ -161,7 +173,8 @@ def _settle_capture(
 
 def _chat_is_open(capture: CaptureResult, chat: str) -> bool:
     return (
-        _find_chat_header(capture, chat) is not None
+        not _is_search_page(capture)
+        and _find_chat_header(capture, chat) is not None
         and _find_input(capture.elements) is not None
     )
 
@@ -236,8 +249,25 @@ def _search_for_chat(
             message=selected.message or f"could not open search result {chat!r}",
             capture=selected.capture,
         )
+    selected_capture = selected.capture
+    if not _chat_is_open(selected_capture, chat) and _is_search_page(selected_capture):
+        # OCR can make the query field look like a chat header and can add a
+        # synthetic input region to result pages. If the first tap was a no-op,
+        # locate the row again from the fresh capture and retry it once.
+        retry_target = find_result(selected_capture)
+        if retry_target is not None:
+            retried = _run_and_capture(
+                backend, "tap", lambda: backend.tap(element=retry_target.index),
+            )
+            if not retried.ok or retried.capture is None:
+                return ActionResult(
+                    ok=False, action="wechat_open_chat",
+                    message=retried.message or f"could not retry search result {chat!r}",
+                    capture=retried.capture,
+                )
+            selected_capture = retried.capture
     selected_capture = _settle_capture(
-        backend, selected.capture, lambda value: _chat_is_open(value, chat),
+        backend, selected_capture, lambda value: _chat_is_open(value, chat),
     )
     if not _chat_is_open(selected_capture, chat):
         return ActionResult(

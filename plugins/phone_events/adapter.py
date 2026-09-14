@@ -73,6 +73,7 @@ _FRIEND_REQUEST_BODIES = frozenset({
     "请求添加你为朋友",
     "申请添加你为好友",
 })
+_AMBIGUOUS_WECHAT_TITLES = frozenset({"wechat", "微信", "group chat", "群聊"})
 
 
 def _wechat_friend_requester(phone_event: Any) -> Optional[str]:
@@ -170,6 +171,14 @@ def _normalized_conversation_title(value: Any) -> str:
     return _NOTIFICATION_COUNT_SUFFIX.sub("", text).strip()
 
 
+def _has_unique_wechat_conversation(phone_event: Any) -> bool:
+    meta = getattr(phone_event, "meta", {}) or {}
+    title = _normalized_conversation_title(
+        meta.get("conversation_title") or getattr(phone_event, "title", "")
+    )
+    return bool(title) and title.casefold() not in _AMBIGUOUS_WECHAT_TITLES
+
+
 def _effective_conversation_type(phone_event: Any, assume_muted_groups: bool) -> str:
     """Classify a WeChat notification, optionally using the muted-groups contract."""
     meta = getattr(phone_event, "meta", {}) or {}
@@ -195,12 +204,15 @@ def _conversation_lane(phone_event: Any) -> tuple[str, str]:
     if kind not in {"group", "private"}:
         kind = "conversation"
 
+    notification_key = str(meta.get("notification_key") or "").strip()
     supplied_key = str(meta.get("conversation_key") or "").strip()
     title = _normalized_conversation_title(
         meta.get("conversation_title")
         or (getattr(phone_event, "title", "") if package == _WECHAT_PACKAGE else "")
     )
-    if supplied_key:
+    if package == _WECHAT_PACKAGE and notification_key:
+        identity = f"{package}:notification:{notification_key}"
+    elif supplied_key:
         identity = f"{package}:{kind}:key:{supplied_key}"
     elif title:
         identity = f"{package}:{kind}:title:{title.casefold()}"
@@ -529,6 +541,17 @@ class PhoneEventAdapter:
                 event.body = truncate_notification_body(redact_sensitive(
                     event.body, enable_otp=self._redact_otp,
                 ))
+
+        if (
+            decision is not None
+            and decision.is_auto
+            and event.package == _WECHAT_PACKAGE
+            and not _has_unique_wechat_conversation(event)
+        ):
+            report = self._format_direct_report(event)
+            if report:
+                self._dispatch_report_to_telegram(report)
+            return
 
         if decision is None or decision.is_report:
             report = self._format_direct_report(event)

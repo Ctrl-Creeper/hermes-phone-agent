@@ -1964,6 +1964,56 @@ def test_wechat_open_chat_waits_for_launch_and_tap_transitions():
     assert captures == []
 
 
+def test_wechat_open_chat_waits_until_wechat_is_foreground_after_launch():
+    launcher_page = [
+        UIElement(index=index, class_name="host.ocr.Text", text=f"app {index}", bounds=(100, 200 + index * 80, 400, 250 + index * 80))
+        for index in range(10)
+    ]
+    list_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="WeChat", bounds=(456, 106, 624, 155)),
+        UIElement(index=2, class_name="host.ocr.Text", text="Example Chat", bounds=(180, 320, 520, 390), clickable=True),
+    ]
+    chat_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="Example Chat", bounds=(320, 104, 756, 157)),
+        UIElement(index=2, class_name="host.ocr.MessageInput", text="[WeChat message input]", bounds=(110, 2165, 720, 2325)),
+    ]
+    captures = [
+        ("com.google.android.apps.nexuslauncher", launcher_page),
+        ("com.tencent.mm", list_page),
+        ("com.tencent.mm", chat_page),
+    ]
+    calls = []
+
+    class Backend:
+        def launch_app(self, package, activity=None):
+            calls.append(("launch_app", package))
+            return phone_tool.ActionResult(ok=True, action="launch_app")
+
+        def tap(self, **kwargs):
+            calls.append(("tap", kwargs.get("element")))
+            return phone_tool.ActionResult(ok=True, action="tap")
+
+        def keyevent(self, keycode):
+            calls.append(("keyevent", keycode))
+            return phone_tool.ActionResult(ok=True, action="keyevent")
+
+        def capture(self, mode):
+            package, elements = captures.pop(0)
+            calls.append(("capture", mode))
+            return phone_tool.CaptureResult(
+                mode=mode, width=1080, height=2400,
+                current_package=package, elements=elements,
+            )
+
+    from plugins.phone_use.wechat import open_chat
+
+    result = open_chat(Backend(), "Example Chat")
+
+    assert result.ok is True
+    assert ("keyevent", "BACK") not in calls
+    assert captures == []
+
+
 def test_wechat_open_chat_waits_for_back_transition_before_list_lookup():
     wrong_chat = [
         UIElement(index=1, class_name="host.ocr.Text", text="HCC 里群（5）", bounds=(320, 104, 756, 157)),
@@ -2114,6 +2164,58 @@ def test_wechat_search_retries_result_tap_instead_of_treating_search_as_chat():
         ("tap", 3),
         ("tap", 3),
     ]
+    assert captures == []
+
+
+def test_wechat_search_opens_unique_top_hit_for_symbol_only_chat_title():
+    list_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="WeChat", bounds=(456, 106, 624, 155)),
+        UIElement(index=2, class_name="host.ocr.WeChatSearch", text="[WeChat search]", bounds=(840, 80, 960, 190), clickable=True),
+        *[
+            UIElement(index=10 + index, class_name="host.ocr.Text", text=f"other {index}", bounds=(200, 300 + index * 80, 500, 350 + index * 80))
+            for index in range(8)
+        ],
+    ]
+    search_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="Search local or internet results", bounds=(180, 120, 820, 190)),
+    ]
+    # Vision commonly reads the inverted question mark as a lowercase i.
+    results_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="Top Hits", bounds=(38, 292, 185, 336)),
+        UIElement(index=2, class_name="host.ocr.Text", text="i(17)2", bounds=(187, 424, 360, 483), clickable=True),
+        UIElement(index=3, class_name="host.ocr.Text", text="Chat Histories", bounds=(41, 596, 283, 632)),
+    ]
+    chat_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="i17)2", bounds=(418, 104, 655, 161)),
+        UIElement(index=2, class_name="host.ocr.MessageInput", text="[WeChat message input]", bounds=(110, 2165, 720, 2325)),
+    ]
+    captures = [list_page, search_page, results_page, chat_page]
+    calls = []
+
+    class Backend:
+        def launch_app(self, package, activity=None):
+            return phone_tool.ActionResult(ok=True, action="launch_app")
+
+        def tap(self, **kwargs):
+            calls.append(("tap", kwargs.get("element")))
+            return phone_tool.ActionResult(ok=True, action="tap")
+
+        def set_text(self, text, element=None):
+            calls.append(("set_text", text))
+            return phone_tool.ActionResult(ok=True, action="set_text")
+
+        def capture(self, mode):
+            return phone_tool.CaptureResult(
+                mode=mode, width=1080, height=2400,
+                current_package="com.tencent.mm", elements=captures.pop(0),
+            )
+
+    from plugins.phone_use.wechat import open_chat
+
+    result = open_chat(Backend(), "¿")
+
+    assert result.ok is True
+    assert calls == [("tap", 2), ("set_text", "¿"), ("tap", 2)]
     assert captures == []
 
 

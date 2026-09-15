@@ -19,12 +19,14 @@ _VOICE_INPUT_LABELS = frozenset({"hold to talk", "按住说话"})
 _VOICE_TRANSCRIPTION_PREFIXES = ("tap to convert to text", "轻触转文字")
 _MIN_TITLE_SIMILARITY = 0.80
 _SEARCH_RESULT_SECTIONS = frozenset({
+    "top hits", "最佳匹配", "最常使用",
     "contacts", "联系人",
     "group chats", "群聊",
     "official accounts", "公众号",
     "mini programs", "小程序",
     "chat history", "聊天记录",
 })
+_TOP_HIT_LABELS = frozenset({"top hits", "最佳匹配", "最常使用"})
 _CONTACT_LABELS = frozenset({"contacts", "通讯录"})
 _CONVERSATION_TAB_LABELS = frozenset({"wechat", "微信", "chats", "聊天"})
 _NEW_FRIENDS_LABELS = frozenset({"new friends", "新的朋友"})
@@ -81,6 +83,11 @@ def _normalize_chat_title(value: str) -> str:
         normalized,
     )
     return normalized
+
+
+def _is_symbol_only_title(value: str) -> bool:
+    normalized = _normalize_chat_title(value)
+    return bool(normalized) and not any(char.isalnum() for char in normalized)
 
 
 def _find_chat_header(capture: CaptureResult, chat: str) -> Optional[UIElement]:
@@ -267,6 +274,29 @@ def _find_row_action(
     )
 
 
+def _find_top_hit(capture: CaptureResult) -> Optional[UIElement]:
+    """Find the first exact-search hit when OCR cannot read its symbol title."""
+    header = next((
+        element for element in capture.elements
+        if _label(element).casefold() in _TOP_HIT_LABELS
+    ), None)
+    if header is None:
+        return None
+
+    next_section_y = min((
+        element.bounds[1] for element in capture.elements
+        if element.bounds[1] > header.bounds[3]
+        and _label(element).casefold() in _SEARCH_RESULT_SECTIONS
+    ), default=int(capture.height * 0.7))
+    candidates = [
+        element for element in capture.elements
+        if element.bounds[1] > header.bounds[3]
+        and element.bounds[3] < next_section_y
+        and _label(element).casefold() not in _SEARCH_RESULT_SECTIONS
+    ]
+    return min(candidates, key=lambda element: element.bounds[1], default=None)
+
+
 def _search_for_chat(
     backend: PhoneBackend,
     capture: CaptureResult,
@@ -315,7 +345,23 @@ def _search_for_chat(
             if element.bounds[1] >= max(220, int(value.height * 0.12))
             and element.bounds[3] < value.height - 180
         ]
-        return _find_text(candidates, chat)
+        matched = _find_text(candidates, chat)
+        if matched is not None:
+            return matched
+        if _is_symbol_only_title(chat):
+            return _find_top_hit(value)
+        return None
+
+    def desired_chat_is_open(value: CaptureResult) -> bool:
+        if _chat_is_open(value, chat):
+            return True
+        # Exact search is still trustworthy for a pure-symbol title even when
+        # Vision renders the glyph as a letter on both the result and header.
+        return (
+            _is_symbol_only_title(chat)
+            and not _is_search_page(value)
+            and _find_input(value.elements) is not None
+        )
 
     results = _settle_capture(
         backend, typed.capture, lambda value: find_result(value) is not None,
@@ -338,7 +384,7 @@ def _search_for_chat(
             capture=selected.capture,
         )
     selected_capture = selected.capture
-    if not _chat_is_open(selected_capture, chat) and _is_search_page(selected_capture):
+    if not desired_chat_is_open(selected_capture) and _is_search_page(selected_capture):
         # OCR can make the query field look like a chat header and can add a
         # synthetic input region to result pages. If the first tap was a no-op,
         # locate the row again from the fresh capture and retry it once.
@@ -355,9 +401,9 @@ def _search_for_chat(
                 )
             selected_capture = retried.capture
     selected_capture = _settle_capture(
-        backend, selected_capture, lambda value: _chat_is_open(value, chat),
+        backend, selected_capture, desired_chat_is_open,
     )
-    if not _chat_is_open(selected_capture, chat):
+    if not desired_chat_is_open(selected_capture):
         return ActionResult(
             ok=False, action="wechat_open_chat",
             message=f"search result did not open the requested WeChat chat {chat!r}",
@@ -575,6 +621,23 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
         )
 
     capture = launch.capture
+    # Android's launcher command can return before WeChat becomes foreground.
+    # Never run WeChat recovery gestures against a stale Launcher screenshot.
+    for _ in range(3):
+        if not capture.current_package or capture.current_package == WECHAT_PACKAGE:
+            break
+        try:
+            capture = backend.capture(mode="hierarchy")
+        except Exception as exc:
+            logger.warning("WeChat foreground wait capture failed: %s", exc)
+            break
+    if capture.current_package and capture.current_package != WECHAT_PACKAGE:
+        return ActionResult(
+            ok=False, action="wechat_open_chat",
+            message="WeChat did not become the foreground app after launch",
+            capture=capture,
+        )
+
     input_element = _find_input(capture.elements)
     if input_element is not None and _find_chat_header(capture, chat) is not None:
         return ActionResult(

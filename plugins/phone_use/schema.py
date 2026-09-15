@@ -160,9 +160,10 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
             "open_images": {
                 "type": "boolean",
                 "description": (
-                    "When true, open clearly identified image bubbles in the "
+                    "Open clearly identified image bubbles in the "
                     "current WeChat history and return preview screenshots for "
-                    "visual analysis. Default false."
+                    "visual analysis (default true). Set false only when the "
+                    "request is explicitly text-only."
                 ),
             },
             "max_images": {

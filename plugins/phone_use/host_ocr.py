@@ -145,7 +145,7 @@ def recognize_text(
         parsed.append((top, left, text, confidence, (left, top, right, bottom)))
 
     parsed.sort(key=lambda item: (item[0], item[1]))
-    return [
+    elements = [
         UIElement(
             index=index,
             class_name="host.ocr.Text",
@@ -156,3 +156,25 @@ def recognize_text(
         )
         for index, (_, _, text, confidence, bounds) in enumerate(parsed, start=1)
     ]
+    raw_regions = payload.get("visualRegions", []) if isinstance(payload, dict) else []
+    for raw in raw_regions:
+        if not isinstance(raw, dict):
+            continue
+        bounds = raw.get("bounds")
+        if not isinstance(bounds, list) or len(bounds) != 4:
+            continue
+        try:
+            left, top, right, bottom = (int(value) for value in bounds)
+            confidence = float(raw.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if right <= left or bottom <= top:
+            continue
+        elements.append(UIElement(
+            index=len(elements) + 1,
+            class_name="host.vision.ImageCandidate",
+            bounds=(left, top, right, bottom),
+            clickable=True,
+            attributes={"source": "vision", "confidence": confidence},
+        ))
+    return elements

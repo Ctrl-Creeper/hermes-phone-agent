@@ -204,16 +204,24 @@ class AdbBackend(PhoneBackend):
         if mode in ("som", "hierarchy", "image_hierarchy"):
             if not use_direct_ocr:
                 elements = self._dump_ui_hierarchy()
-            if not _hierarchy_is_usable(elements):
+            hierarchy_usable = _hierarchy_is_usable(elements)
+            if not hierarchy_usable or mode == "image_hierarchy":
                 ocr_png_b64 = png_b64 or self._take_screenshot()
                 if ocr_png_b64:
                     ocr_elements = recognize_text(ocr_png_b64)
                     if ocr_elements:
-                        elements = ocr_elements
-                        used_host_ocr = True
+                        if hierarchy_usable:
+                            for element in ocr_elements:
+                                if element.class_name != "host.vision.ImageCandidate":
+                                    continue
+                                element.index = len(elements) + 1
+                                elements.append(element)
+                        else:
+                            elements = ocr_elements
+                            used_host_ocr = True
                         logger.info(
-                            "Host OCR fallback produced %d text elements",
-                            len(elements),
+                            "Host vision produced %d element(s)",
+                            len(ocr_elements),
                         )
         if used_host_ocr:
             elements = add_semantic_regions(
@@ -222,7 +230,7 @@ class AdbBackend(PhoneBackend):
                 width=info.screen_width,
                 height=info.screen_height,
             )
-        if mode in ("som", "hierarchy"):
+        if mode in ("som", "hierarchy", "image_hierarchy"):
             self._last_elements = elements
         return CaptureResult(
             mode=mode, width=info.screen_width, height=info.screen_height,

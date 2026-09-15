@@ -780,7 +780,7 @@ def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
             max_pages=int(args.get("max_pages", 8)),
             max_minutes=int(args.get("max_minutes", 10)),
             include_images=args.get("include_images", True) is not False,
-            open_images=args.get("open_images", False) is True,
+            open_images=args.get("open_images", True) is not False,
             max_images=int(args.get("max_images", 3)),
         )
         payload = dict(res.meta)

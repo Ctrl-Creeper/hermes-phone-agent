@@ -2219,6 +2219,78 @@ def test_wechat_search_opens_unique_top_hit_for_symbol_only_chat_title():
     assert captures == []
 
 
+def test_wechat_open_chat_reuses_recently_confirmed_symbol_header():
+    chat_page = phone_tool.CaptureResult(
+        mode="hierarchy", width=1080, height=2400,
+        current_package="com.tencent.mm", current_activity=".ui.chatting.ChattingUI",
+        elements=[
+            UIElement(index=1, class_name="host.ocr.Text", text="i17)2", bounds=(418, 104, 655, 161)),
+            UIElement(index=2, class_name="host.ocr.MessageInput", text="[WeChat message input]", bounds=(110, 2165, 720, 2325)),
+        ],
+    )
+    calls = []
+
+    class Backend:
+        def launch_app(self, package, activity=None):
+            return phone_tool.ActionResult(ok=True, action="launch_app")
+
+        def capture(self, mode):
+            calls.append(("capture", mode))
+            return chat_page
+
+        def keyevent(self, keycode):
+            calls.append(("keyevent", keycode))
+            return phone_tool.ActionResult(ok=True, action="keyevent")
+
+    from plugins.phone_use import wechat
+
+    wechat._remember_symbol_chat("¿", chat_page)
+    try:
+        result = wechat.open_chat(Backend(), "¿")
+    finally:
+        wechat._clear_symbol_chat_hint("¿")
+
+    assert result.ok is True
+    assert calls == [("capture", "hierarchy")]
+
+
+def test_wechat_recovery_uses_launcher_tab_position_when_ocr_misses_label():
+    launcher_page = phone_tool.CaptureResult(
+        mode="hierarchy", width=1080, height=2400,
+        current_package="com.tencent.mm", current_activity=".ui.LauncherUI",
+        elements=[
+            UIElement(index=1, class_name="host.ocr.Text", text="Discover", bounds=(430, 106, 650, 155)),
+        ],
+    )
+    list_page = phone_tool.CaptureResult(
+        mode="hierarchy", width=1080, height=2400,
+        current_package="com.tencent.mm", current_activity=".ui.LauncherUI",
+        elements=[
+            UIElement(index=1, class_name="host.ocr.Text", text="WeChat", bounds=(456, 106, 624, 155)),
+        ],
+    )
+    calls = []
+
+    class Backend:
+        def tap(self, **kwargs):
+            calls.append(("tap", kwargs))
+            return phone_tool.ActionResult(ok=True, action="tap")
+
+        def keyevent(self, keycode):
+            calls.append(("keyevent", keycode))
+            return phone_tool.ActionResult(ok=True, action="keyevent")
+
+        def capture(self, mode):
+            return list_page
+
+    from plugins.phone_use.wechat import _return_to_conversation_list
+
+    result = _return_to_conversation_list(Backend(), launcher_page)
+
+    assert result.ok is True
+    assert calls == [("tap", {"x": 135, "y": 2280})]
+
+
 def test_wechat_open_chat_leaves_contacts_tab_before_looking_up_chat():
     contacts_page = [
         UIElement(index=1, class_name="host.ocr.Text", text="Contacts", bounds=(430, 106, 650, 155)),

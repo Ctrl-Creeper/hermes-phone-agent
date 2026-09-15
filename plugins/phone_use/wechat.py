@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from difflib import SequenceMatcher
 from typing import Callable, Optional
 
@@ -32,6 +33,8 @@ _CONVERSATION_TAB_LABELS = frozenset({"wechat", "微信", "chats", "聊天"})
 _NEW_FRIENDS_LABELS = frozenset({"new friends", "新的朋友"})
 _ACCEPT_LABELS = frozenset({"accept", "接受", "添加"})
 _ADDED_LABELS = frozenset({"added", "accepted", "已添加", "已通过"})
+_SYMBOL_CHAT_HINT_TTL_SECONDS = 120.0
+_symbol_chat_hint: Optional[tuple[str, str, float]] = None
 
 
 def _label(element: UIElement) -> str:
@@ -90,6 +93,58 @@ def _is_symbol_only_title(value: str) -> bool:
     return bool(normalized) and not any(char.isalnum() for char in normalized)
 
 
+def _symbol_header_signature(capture: CaptureResult) -> str:
+    title_limit = max(220, int(capture.height * 0.12))
+    candidates = [
+        element for element in capture.elements
+        if element.bounds[1] < title_limit
+        and int(capture.width * 0.18) <= element.center()[0] <= int(capture.width * 0.82)
+        and _normalize_chat_title(_label(element))
+    ]
+    if not candidates:
+        return ""
+    centered = min(
+        candidates,
+        key=lambda element: abs(element.center()[0] - capture.width // 2),
+    )
+    return _normalize_chat_title(_label(centered))
+
+
+def _remember_symbol_chat(chat: str, capture: CaptureResult) -> None:
+    global _symbol_chat_hint
+    if not _is_symbol_only_title(chat) or _find_input(capture.elements) is None:
+        return
+    signature = _symbol_header_signature(capture)
+    if signature:
+        _symbol_chat_hint = (
+            _normalize_chat_title(chat), signature, time.monotonic(),
+        )
+
+
+def _clear_symbol_chat_hint(chat: str = "") -> None:
+    global _symbol_chat_hint
+    if (
+        not chat
+        or _symbol_chat_hint is None
+        or _symbol_chat_hint[0] == _normalize_chat_title(chat)
+    ):
+        _symbol_chat_hint = None
+
+
+def _matches_recent_symbol_chat(chat: str, capture: CaptureResult) -> bool:
+    global _symbol_chat_hint
+    if _symbol_chat_hint is None or not _is_symbol_only_title(chat):
+        return False
+    wanted, signature, observed_at = _symbol_chat_hint
+    if time.monotonic() - observed_at > _SYMBOL_CHAT_HINT_TTL_SECONDS:
+        _symbol_chat_hint = None
+        return False
+    if wanted != _normalize_chat_title(chat):
+        return False
+    observed = _symbol_header_signature(capture)
+    return bool(observed) and observed == signature
+
+
 def _find_chat_header(capture: CaptureResult, chat: str) -> Optional[UIElement]:
     """Find the conversation title, as opposed to a list row or message body."""
     wanted = _normalize_chat_title(chat)
@@ -109,6 +164,12 @@ def _find_chat_header(capture: CaptureResult, chat: str) -> Optional[UIElement]:
             >= _MIN_TITLE_SIMILARITY
         ):
             return element
+    if _matches_recent_symbol_chat(chat, capture):
+        return min(
+            candidates,
+            key=lambda element: abs(element.center()[0] - capture.width // 2),
+            default=None,
+        )
     return None
 
 
@@ -216,6 +277,14 @@ def _return_to_conversation_list(
             moved = _run_and_capture(
                 backend, "tap",
                 lambda target=conversation_tab: backend.tap(element=target.index),
+            )
+        elif current.current_activity.casefold().endswith("launcherui"):
+            moved = _run_and_capture(
+                backend, "tap",
+                lambda: backend.tap(
+                    x=int(current.width * 0.125),
+                    y=int(current.height * 0.95),
+                ),
             )
         else:
             moved = _run_and_capture(
@@ -409,6 +478,7 @@ def _search_for_chat(
             message=f"search result did not open the requested WeChat chat {chat!r}",
             capture=selected_capture,
         )
+    _remember_symbol_chat(chat, selected_capture)
     return ActionResult(
         ok=True, action="wechat_open_chat",
         message=f"opened WeChat chat {chat!r} via search",
@@ -886,6 +956,7 @@ def reply(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
                     f"{result.message}; delivery was not retried after Home "
                     f"cleanup failed: {home.message}"
                 )
+        _clear_symbol_chat_hint(chat)
 
 
 def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult:

@@ -1404,10 +1404,10 @@ def test_wechat_reply_uses_one_deterministic_action_and_always_goes_home():
         ("tap", 1),
         ("capture", "hierarchy"),
         ("tap", 2),
-        ("capture", "hierarchy"),
         ("set_text", "收到，我晚点看"),
         ("capture", "hierarchy"),
         ("tap", 3),
+        ("capture", "hierarchy"),
         ("capture", "hierarchy"),
         ("keyevent", "HOME"),
         ("capture", "hierarchy"),
@@ -1636,6 +1636,40 @@ def test_wechat_reply_waits_for_send_button_after_paste_transition():
     assert result["ok"] is True
     assert ("tap", 3) in calls
     assert captures == []
+
+
+def test_wechat_prepare_text_input_does_not_run_slow_ocr_before_paste():
+    chat_page = phone_tool.CaptureResult(
+        mode="hierarchy", width=1080, height=2400,
+        current_package="com.tencent.mm",
+        elements=[
+            UIElement(
+                index=1, class_name="host.ocr.Text", text="Example Chat",
+                bounds=(320, 104, 756, 157),
+            ),
+            UIElement(
+                index=2, class_name="host.ocr.MessageInput",
+                text="[WeChat message input]", bounds=(110, 2165, 720, 2325),
+                clickable=True, focusable=True,
+            ),
+        ],
+    )
+    calls = []
+
+    class Backend:
+        def tap(self, *, element=None, x=None, y=None):
+            calls.append(("tap", element))
+            return phone_tool.ActionResult(ok=True, action="tap")
+
+        def capture(self, mode):
+            calls.append(("capture", mode))
+            return chat_page
+
+    result = wechat_module._prepare_text_input(Backend(), chat_page)
+
+    assert result.ok is True
+    assert result.capture is chat_page
+    assert calls == [("tap", 2)]
 
 
 def test_wechat_reply_waits_for_reply_after_send_transition():
@@ -2080,6 +2114,94 @@ def test_wechat_search_retries_result_tap_instead_of_treating_search_as_chat():
         ("tap", 3),
         ("tap", 3),
     ]
+    assert captures == []
+
+
+def test_wechat_open_chat_leaves_contacts_tab_before_looking_up_chat():
+    contacts_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="Contacts", bounds=(430, 106, 650, 155)),
+        UIElement(index=2, class_name="host.ocr.WeChatSearch", text="[WeChat search]", bounds=(840, 80, 960, 190), clickable=True),
+        UIElement(index=3, class_name="host.ocr.Text", text="WeChat", bounds=(50, 2240, 240, 2320), clickable=True),
+        UIElement(index=4, class_name="host.ocr.Text", text="Contacts", bounds=(300, 2240, 500, 2320), clickable=True),
+    ]
+    list_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="WeChat", bounds=(456, 106, 624, 155)),
+        UIElement(index=2, class_name="host.ocr.Text", text="Example Chat", bounds=(180, 320, 520, 390), clickable=True),
+    ]
+    chat_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="Example Chat", bounds=(320, 104, 756, 157)),
+        UIElement(index=2, class_name="host.ocr.MessageInput", text="[WeChat message input]", bounds=(110, 2165, 720, 2325)),
+    ]
+    captures = [contacts_page, list_page, chat_page]
+    calls = []
+
+    class Backend:
+        def launch_app(self, package, activity=None):
+            return phone_tool.ActionResult(ok=True, action="launch_app")
+
+        def tap(self, **kwargs):
+            calls.append(("tap", kwargs.get("element")))
+            return phone_tool.ActionResult(ok=True, action="tap")
+
+        def set_text(self, text, element=None):
+            calls.append(("set_text", text))
+            return phone_tool.ActionResult(ok=True, action="set_text")
+
+        def capture(self, mode):
+            return phone_tool.CaptureResult(
+                mode=mode, width=1080, height=2400,
+                current_package="com.tencent.mm", elements=captures.pop(0),
+            )
+
+    from plugins.phone_use.wechat import open_chat
+
+    result = open_chat(Backend(), "Example Chat")
+
+    assert result.ok is True
+    assert calls == [("tap", 3), ("tap", 2)]
+    assert captures == []
+
+
+def test_wechat_open_chat_clears_existing_search_state_before_retry():
+    stale_search_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="Search local or internet results", bounds=(180, 120, 820, 190)),
+        UIElement(index=2, class_name="host.ocr.Text", text="Example ChatExample Chat", bounds=(180, 210, 820, 270)),
+    ]
+    list_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="WeChat", bounds=(456, 106, 624, 155)),
+        UIElement(index=2, class_name="host.ocr.Text", text="Example Chat", bounds=(180, 320, 520, 390), clickable=True),
+    ]
+    chat_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="Example Chat", bounds=(320, 104, 756, 157)),
+        UIElement(index=2, class_name="host.ocr.MessageInput", text="[WeChat message input]", bounds=(110, 2165, 720, 2325)),
+    ]
+    captures = [stale_search_page, list_page, chat_page]
+    calls = []
+
+    class Backend:
+        def launch_app(self, package, activity=None):
+            return phone_tool.ActionResult(ok=True, action="launch_app")
+
+        def keyevent(self, keycode):
+            calls.append(("keyevent", keycode))
+            return phone_tool.ActionResult(ok=True, action="keyevent")
+
+        def tap(self, **kwargs):
+            calls.append(("tap", kwargs.get("element")))
+            return phone_tool.ActionResult(ok=True, action="tap")
+
+        def capture(self, mode):
+            return phone_tool.CaptureResult(
+                mode=mode, width=1080, height=2400,
+                current_package="com.tencent.mm", elements=captures.pop(0),
+            )
+
+    from plugins.phone_use.wechat import open_chat
+
+    result = open_chat(Backend(), "Example Chat")
+
+    assert result.ok is True
+    assert calls == [("keyevent", "BACK"), ("tap", 2)]
     assert captures == []
 
 
@@ -2971,7 +3093,7 @@ def test_wechat_reply_retries_failed_attempt_once(monkeypatch):
 
     assert result.ok is True
     assert attempts == [("群聊", "你好"), ("群聊", "你好")]
-    assert backs == ["BACK", "HOME"]
+    assert backs == ["HOME"]
 
 
 def test_wechat_reply_reports_after_two_failed_attempts(monkeypatch):

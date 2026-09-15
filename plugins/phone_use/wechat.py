@@ -26,6 +26,7 @@ _SEARCH_RESULT_SECTIONS = frozenset({
     "chat history", "聊天记录",
 })
 _CONTACT_LABELS = frozenset({"contacts", "通讯录"})
+_CONVERSATION_TAB_LABELS = frozenset({"wechat", "微信", "chats", "聊天"})
 _NEW_FRIENDS_LABELS = frozenset({"new friends", "新的朋友"})
 _ACCEPT_LABELS = frozenset({"accept", "接受", "添加"})
 _ADDED_LABELS = frozenset({"added", "accepted", "已添加", "已通过"})
@@ -120,6 +121,16 @@ def _is_conversation_list(capture: CaptureResult) -> bool:
     ) and _find_input(capture.elements) is None
 
 
+def _find_conversation_tab(capture: CaptureResult) -> Optional[UIElement]:
+    """Find the bottom Chats/WeChat tab on any top-level WeChat page."""
+    min_y = int(capture.height * 0.84)
+    return next((
+        element for element in capture.elements
+        if element.bounds[1] >= min_y
+        and _normalize_chat_title(_label(element)) in _CONVERSATION_TAB_LABELS
+    ), None)
+
+
 def _find_search_control(capture: CaptureResult) -> Optional[UIElement]:
     semantic = next(
         (
@@ -161,7 +172,7 @@ def _settle_capture(
     backend: PhoneBackend,
     capture: CaptureResult,
     predicate: Callable[[CaptureResult], bool],
-    attempts: int = 3,
+    attempts: int = 2,
 ) -> CaptureResult:
     current = capture
     for _ in range(attempts):
@@ -173,6 +184,49 @@ def _settle_capture(
             logger.warning("WeChat settle capture failed: %s", exc)
             break
     return current
+
+
+def _return_to_conversation_list(
+    backend: PhoneBackend,
+    capture: CaptureResult,
+    *,
+    max_steps: int = 4,
+) -> ActionResult:
+    """Normalize arbitrary WeChat state to the conversation list."""
+    current = capture
+    for _ in range(max_steps):
+        if _is_conversation_list(current):
+            return ActionResult(
+                ok=True, action="wechat_open_chat", capture=current,
+                message="WeChat conversation list is ready",
+            )
+
+        # Contacts, Discover/Moments, and Me expose the stable bottom tab.
+        # Prefer it over Back because Back can leave WeChat or merely dismiss
+        # a keyboard without changing pages.
+        conversation_tab = _find_conversation_tab(current)
+        if conversation_tab is not None:
+            moved = _run_and_capture(
+                backend, "tap",
+                lambda target=conversation_tab: backend.tap(element=target.index),
+            )
+        else:
+            moved = _run_and_capture(
+                backend, "keyevent", lambda: backend.keyevent("BACK"),
+            )
+        if not moved.ok or moved.capture is None:
+            return ActionResult(
+                ok=False, action="wechat_open_chat",
+                message=moved.message or "could not return to WeChat conversation list",
+                capture=moved.capture or current,
+            )
+        current = moved.capture
+
+    return ActionResult(
+        ok=False, action="wechat_open_chat",
+        message="could not reach the WeChat conversation list after recovery",
+        capture=current,
+    )
 
 
 def _chat_is_open(capture: CaptureResult, chat: str) -> bool:
@@ -491,11 +545,14 @@ def _prepare_text_input(
     if current is not capture:
         return ActionResult(ok=True, action="tap", capture=current)
 
-    return _run_and_capture(
-        backend,
-        "tap",
-        lambda: backend.tap(element=message_input.index),
-    )
+    try:
+        focused = backend.tap(element=message_input.index)
+    except Exception as exc:
+        return ActionResult(
+            ok=False, action="tap", message=str(exc), capture=current,
+        )
+    focused.capture = current
+    return focused
 
 
 def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
@@ -537,6 +594,8 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
         ]
         if input_element is not None or _find_text(list_elements, chat) is not None:
             break
+        if _is_search_page(capture) or _find_conversation_tab(capture) is not None:
+            break
         if len(capture.elements) >= 10:
             break
         try:
@@ -571,28 +630,22 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
                     capture=capture,
                 )
 
-    if input_element is not None:
-        back = _run_and_capture(
-            backend,
-            "keyevent",
-            lambda: backend.keyevent("BACK"),
-        )
-        if not back.ok or back.capture is None:
-            return ActionResult(
-                ok=False,
-                action="wechat_open_chat",
-                message=back.message or "could not return to WeChat conversation list",
-                capture=back.capture,
-            )
-        capture = back.capture
-        capture = _settle_capture(backend, capture, _is_conversation_list)
-        if not _is_conversation_list(capture):
-            return ActionResult(
-                ok=False,
-                action="wechat_open_chat",
-                message="WeChat conversation list did not become ready after Back",
-                capture=capture,
-            )
+    list_elements = [
+        element for element in capture.elements
+        if element.bounds[1] >= max(220, int(capture.height * 0.12))
+        and element.bounds[3] < capture.height - 180
+    ]
+    target = _find_text(list_elements, chat)
+    page_needs_recovery = (
+        _is_search_page(capture)
+        or _find_input(capture.elements) is not None
+        or _find_conversation_tab(capture) is not None
+    )
+    if not _is_conversation_list(capture) and (page_needs_recovery or target is None):
+        recovered = _return_to_conversation_list(backend, capture)
+        if not recovered.ok or recovered.capture is None:
+            return recovered
+        capture = recovered.capture
 
     # Only use a fresh list-row match. A message body or notification preview
     # with the same text must never be treated as a conversation target.
@@ -739,11 +792,10 @@ def reply(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
                     "WeChat reply recovery: retrying chat=%r after: %s",
                     chat, result.message,
                 )
-                # Reset transient search/chat state before the second lookup.
-                try:
-                    backend.keyevent("BACK")
-                except Exception:
-                    logger.debug("WeChat recovery Back failed", exc_info=True)
+                # open_chat() owns recovery and verifies that it reached the
+                # conversation list. Avoid an unverified Back here: on a
+                # search page it often only dismisses the keyboard, leaving a
+                # stale query that the next paste can append to.
         result.message = f"after 2 attempts: {result.message}"
         return result
     except Exception as exc:

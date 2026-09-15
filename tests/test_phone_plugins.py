@@ -2337,6 +2337,66 @@ def test_wechat_context_screenshots_reach_model_as_multimodal_result(monkeypatch
     }
 
 
+def test_wechat_context_opens_image_bubbles_and_returns_to_chat(monkeypatch):
+    from plugins.phone_use import wechat_context
+
+    chat_page = phone_tool.CaptureResult(
+        mode="hierarchy", width=1080, height=2400,
+        current_package="com.tencent.mm", current_activity="ChatUI",
+        elements=[
+            UIElement(index=1, class_name="host.ocr.Text", text="群聊", bounds=(400, 80, 680, 150)),
+            UIElement(index=4, class_name="android.widget.ImageView", content_desc="头像", bounds=(20, 400, 120, 500), clickable=True),
+            UIElement(index=2, class_name="android.widget.ImageView", content_desc="图片", bounds=(120, 500, 620, 980), clickable=True),
+            UIElement(index=3, class_name="host.ocr.MessageInput", text="input", bounds=(100, 2150, 900, 2320)),
+        ],
+    )
+    viewer_page = phone_tool.CaptureResult(
+        mode="screenshot", width=1080, height=2400,
+        current_package="com.tencent.mm", current_activity="ImagePreviewUI",
+        png_b64="b3JpZ2luYWwtaW1hZ2U=",
+    )
+    calls = []
+    monkeypatch.setattr(
+        wechat_context,
+        "open_chat",
+        lambda backend, chat: phone_tool.ActionResult(
+            ok=True, action="wechat_open_chat", capture=chat_page,
+        ),
+    )
+
+    class Backend:
+        def capture(self, mode):
+            calls.append(("capture", mode))
+            if mode == "screenshot":
+                return viewer_page
+            return chat_page
+
+        def tap(self, **kwargs):
+            calls.append(("tap", kwargs.get("element")))
+            return phone_tool.ActionResult(ok=True, action="tap", capture=viewer_page)
+
+        def keyevent(self, keycode):
+            calls.append(("keyevent", keycode))
+            return phone_tool.ActionResult(ok=True, action="keyevent", capture=chat_page)
+
+        def swipe(self, **kwargs):
+            return phone_tool.ActionResult(ok=False, action="swipe", message="done")
+
+        def wait(self, seconds):
+            return phone_tool.ActionResult(ok=True, action="wait")
+
+    result = wechat_context.collect_context(
+        Backend(), "群聊", max_messages=10, max_pages=1,
+        include_images=True, open_images=True, max_images=1,
+    )
+
+    assert result.ok is True
+    assert result.meta["screenshots"] == ["b3JpZ2luYWwtaW1hZ2U="]
+    assert result.meta["image_count"] == 1
+    assert ("tap", 2) in calls
+    assert ("keyevent", "BACK") in calls
+
+
 def test_wechat_reply_returns_home_when_chat_cannot_be_found():
     calls = []
 

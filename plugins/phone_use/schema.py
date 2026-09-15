@@ -157,6 +157,18 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                     "is explicitly text-only. Never opens uncertain image bubbles."
                 ),
             },
+            "open_images": {
+                "type": "boolean",
+                "description": (
+                    "When true, open clearly identified image bubbles in the "
+                    "current WeChat history and return preview screenshots for "
+                    "visual analysis. Default false."
+                ),
+            },
+            "max_images": {
+                "type": "integer", "minimum": 1, "maximum": 5,
+                "description": "Maximum image bubbles to open (default 3).",
+            },
             "keycode": {
                 "type": "string",
                 "description": (

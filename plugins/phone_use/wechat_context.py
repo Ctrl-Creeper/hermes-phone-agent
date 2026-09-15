@@ -23,6 +23,62 @@ class UnsupportedCollectionScope(ValueError):
     """Raised when a non-empty natural-language range cannot be bounded."""
 
 
+_IMAGE_LABELS = frozenset({"image", "photo", "picture", "图片", "照片"})
+
+
+def _image_bubbles(capture: CaptureResult) -> list:
+    """Find likely clickable image messages, excluding the composer area."""
+    top = max(220, int(capture.height * 0.10))
+    bottom = capture.height - 235
+    candidates = []
+    for element in capture.elements:
+        label = (element.text or element.content_desc or "").strip().casefold()
+        class_name = (element.class_name or "").casefold()
+        resource_id = (element.resource_id or "").casefold()
+        left, y1, right, y2 = element.bounds
+        area = max(0, right - left) * max(0, y2 - y1)
+        large_image_view = (
+            "image" in class_name
+            and area >= 30_000
+            and (right - left) >= 120
+            and (y2 - y1) >= 120
+        )
+        semantic_image = (
+            label in _IMAGE_LABELS
+            or "image" in resource_id
+            or "photo" in resource_id
+            or "图片" in resource_id
+            or large_image_view
+        )
+        if (
+            element.clickable
+            and semantic_image
+            and y1 >= top
+            and y2 <= bottom
+            and area >= 4_000
+        ):
+            candidates.append(element)
+    return candidates
+
+
+def _open_image_bubble(
+    backend: PhoneBackend, element: object,
+) -> Optional[str]:
+    """Open one image bubble, capture its preview, and return to the chat."""
+    tapped = backend.tap(element=element.index)
+    if not tapped.ok:
+        return None
+    backend.wait(0.25)
+    preview = backend.capture(mode="screenshot")
+    image = preview.png_b64 or getattr(tapped.capture, "png_b64", None)
+    try:
+        backend.keyevent("BACK")
+        backend.wait(0.15)
+    except Exception:
+        logger.warning("Could not return from WeChat image preview", exc_info=True)
+    return image
+
+
 def parse_collection_scope(
     scope: str = "",
     *,
@@ -111,6 +167,8 @@ def collect_context(
     max_pages: int = 8,
     max_minutes: int = 10,
     include_images: bool = True,
+    open_images: bool = False,
+    max_images: int = 3,
 ) -> ActionResult:
     try:
         effective = parse_collection_scope(
@@ -139,6 +197,9 @@ def collect_context(
     current = opened.capture
     combined: list[str] = []
     screenshots: list[str] = []
+    opened_images = 0
+    max_images = max(0, min(int(max_images), 5))
+    seen_image_bubbles: set[tuple[str, tuple[int, int, int, int]]] = set()
     signatures: set[tuple[str, ...]] = set()
     stop_reason = "page_limit"
     now = datetime.now().astimezone()
@@ -146,10 +207,31 @@ def collect_context(
 
     for page_index in range(effective.max_pages):
         if include_images:
-            visual = backend.capture(mode="som")
-            if visual.png_b64 and len(screenshots) < 5:
+            # Image inspection needs the real accessibility nodes (ImageView
+            # bounds/click targets), while ordinary context collection can use
+            # the faster OCR-backed SOM capture.
+            visual = backend.capture(
+                mode="image_hierarchy" if open_images else "som"
+            )
+            if visual.png_b64 and not open_images and len(screenshots) < 5:
                 screenshots.append(visual.png_b64)
             current = visual
+
+            if open_images and opened_images < max_images:
+                for image_element in _image_bubbles(current):
+                    signature = (
+                        (image_element.text or image_element.content_desc or "").strip(),
+                        image_element.bounds,
+                    )
+                    if signature in seen_image_bubbles:
+                        continue
+                    seen_image_bubbles.add(signature)
+                    image = _open_image_bubble(backend, image_element)
+                    if image:
+                        screenshots.append(image)
+                        opened_images += 1
+                    if opened_images >= max_images:
+                        break
 
         page_lines = _visible_lines(current)
         signature = tuple(page_lines)
@@ -194,6 +276,7 @@ def collect_context(
         "coverage": coverage,
         "stop_reason": stop_reason,
         "screenshots": screenshots,
+        "image_count": opened_images if open_images else len(screenshots),
     }
     return ActionResult(
         ok=True,

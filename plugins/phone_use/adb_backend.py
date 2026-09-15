@@ -191,12 +191,17 @@ class AdbBackend(PhoneBackend):
         elements: List[UIElement] = []
         used_host_ocr = False
         fg = self._get_foreground_app()
-        use_direct_ocr = fg.get("package") == "com.tencent.mm"
+        # WeChat normally benefits from host OCR because its hierarchy is
+        # sparse, but image inspection needs ImageView nodes and therefore
+        # gets a first attempt at the real accessibility hierarchy.
+        use_direct_ocr = (
+            fg.get("package") == "com.tencent.mm" and mode != "image_hierarchy"
+        )
 
-        if mode in ("som", "screenshot"):
+        if mode in ("som", "screenshot", "image_hierarchy"):
             png_b64 = self._take_screenshot()
 
-        if mode in ("som", "hierarchy"):
+        if mode in ("som", "hierarchy", "image_hierarchy"):
             if not use_direct_ocr:
                 elements = self._dump_ui_hierarchy()
             if not _hierarchy_is_usable(elements):

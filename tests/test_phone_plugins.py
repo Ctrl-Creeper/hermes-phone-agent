@@ -2253,6 +2253,55 @@ def test_wechat_context_collection_stops_on_repeated_page(monkeypatch):
     assert result.meta["coverage"] == "partial"
 
 
+def test_wechat_context_excludes_ime_rows_before_message_limit(monkeypatch):
+    from plugins.phone_use import wechat_context
+
+    def page(lines):
+        elements = [
+            UIElement(index=1, class_name="host.ocr.Text", text="群聊", bounds=(400, 80, 680, 150)),
+            UIElement(index=99, class_name="host.ocr.MessageInput", text="input", bounds=(100, 2150, 900, 2320)),
+        ]
+        elements.extend(
+            UIElement(index=i, class_name="host.ocr.Text", text=text, bounds=(180, y, 700, y + 60))
+            for i, (text, y) in enumerate(lines, start=2)
+        )
+        return phone_tool.CaptureResult(
+            mode="hierarchy", width=1080, height=2400,
+            current_package="com.tencent.mm", elements=elements,
+        )
+
+    pages = [
+        page([("较新的消息", 500), ("WERTYU-O", 1750), ("ASDFGHJKL", 1840), ("ZXCVBNM", 1930)]),
+        page([("更早的消息", 500)]),
+    ]
+    calls = []
+
+    class Backend:
+        def capture(self, mode):
+            return pages[0]
+
+        def swipe(self, **kwargs):
+            calls.append(kwargs["direction"])
+            pages.pop(0)
+            return phone_tool.ActionResult(ok=True, action="swipe")
+
+        def wait(self, seconds):
+            return phone_tool.ActionResult(ok=True, action="wait")
+
+    monkeypatch.setattr(
+        wechat_context,
+        "open_chat",
+        lambda backend, chat: phone_tool.ActionResult(ok=True, action="wechat_open_chat", capture=pages[0]),
+    )
+    result = wechat_context.collect_context(
+        Backend(), "群聊", max_messages=2, max_pages=2, include_images=False,
+    )
+
+    assert result.ok is True
+    assert result.meta["lines"] == ["更早的消息", "较新的消息"]
+    assert calls == ["down"]
+
+
 def test_wechat_context_action_returns_structured_collection(monkeypatch):
     observed = {}
 

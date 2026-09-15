@@ -126,7 +126,10 @@ def merge_older_lines(existing: list[str], older_page: list[str]) -> list[str]:
 
 def _visible_lines(capture: CaptureResult) -> list[str]:
     top = max(220, int(capture.height * 0.10))
-    bottom = capture.height - 235
+    # The Android IME occupies the lower part of the screenshot while the
+    # message input remains above it. Keep a generous margin so OCR keyboard
+    # rows cannot consume the requested message count.
+    bottom = capture.height - max(400, int(capture.height * 0.22))
     lines = []
     for element in sorted(capture.elements, key=lambda item: (item.bounds[1], item.bounds[0])):
         if element.class_name == "host.ocr.MessageInput":
@@ -135,6 +138,10 @@ def _visible_lines(capture: CaptureResult) -> list[str]:
             continue
         label = re.sub(r"\s+", " ", (element.text or element.content_desc or "")).strip()
         if label:
+            # Apple/Google keyboard OCR commonly appears as rows such as
+            # WERTYU-O, ASDFGHJKL, or ZXCVBNM. These are never chat lines.
+            if re.fullmatch(r"[A-Z][A-Z0-9 .,'’_@#*+\-=]{4,}", label):
+                continue
             lines.append(label)
     return lines
 

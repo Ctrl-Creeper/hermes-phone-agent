@@ -171,6 +171,64 @@ app_profiles:
 
 event_rules:
 
+  # WeChat task inbox: groups require an explicit @Void_DRSAI in the message
+  # body. The helper APK supplies conversation_type, so this cannot affect DMs.
+  - match:
+      package: "com.tencent.mm"
+      event: notification
+      conversation_type: group
+      body_regex: "(?i)@void_drsai(?![a-z0-9_])"
+    behavior: auto
+    instruction_source: true
+    allowed_actions:
+      - capture
+      - wait
+      - list_apps
+      - current_app
+      - device_info
+      - launch_app
+      - tap
+      - swipe
+      - keyevent
+      - wechat_open_chat
+      - wechat_reply
+      - wechat_collect_context
+    notes: "Explicit @Void_DRSAI mention in a WeChat group; process as an automatic task."
+    priority: 30
+
+  # All other WeChat group notifications are silent. This keeps unmuted groups
+  # from waking the model or generating Telegram reports.
+  - match:
+      package: "com.tencent.mm"
+      event: notification
+      conversation_type: group
+    behavior: ignore
+    notes: "Ignore WeChat group notifications unless the message explicitly mentions @Void_DRSAI."
+    priority: 28
+
+  # Friend DMs remain automatic and do not require an @ mention.
+  - match:
+      package: "com.tencent.mm"
+      event: notification
+      conversation_type: private
+    behavior: auto
+    instruction_source: true
+    allowed_actions:
+      - capture
+      - wait
+      - list_apps
+      - current_app
+      - device_info
+      - launch_app
+      - tap
+      - swipe
+      - keyevent
+      - wechat_open_chat
+      - wechat_reply
+      - wechat_collect_context
+    notes: "Authenticated WeChat private message; process without an @ mention."
+    priority: 29
+
   # Returning Home is workflow cleanup, not a new task.
   - match:
       package: "*launcher*"

@@ -3351,6 +3351,66 @@ def test_policy_can_match_private_wechat_conversation_type():
     assert unknown.is_report
 
 
+def test_group_wechat_policy_requires_exact_void_dr_sai_mention():
+    policy = _parse_config({
+        "default_behavior": "report",
+        "event_rules": [
+            {
+                "match": {
+                    "package": "com.tencent.mm",
+                    "event": "notification",
+                    "conversation_type": "group",
+                    "body_regex": r"(?i)@void_drsai(?![a-z0-9_])",
+                },
+                "behavior": "auto",
+                "instruction_source": True,
+                "priority": 30,
+            },
+            {
+                "match": {
+                    "package": "com.tencent.mm",
+                    "event": "notification",
+                    "conversation_type": "private",
+                },
+                "behavior": "auto",
+                "instruction_source": True,
+                "priority": 29,
+            },
+            {
+                "match": {
+                    "package": "com.tencent.mm",
+                    "event": "notification",
+                    "conversation_type": "group",
+                },
+                "behavior": "ignore",
+                "priority": 28,
+            },
+        ],
+    })
+
+    mentioned = policy.evaluate_event(
+        package="com.tencent.mm", event_type="notification",
+        title="项目群", body="Alice: @Void_DRSAI 你好", conversation_type="group",
+    )
+    unmentioned = policy.evaluate_event(
+        package="com.tencent.mm", event_type="notification",
+        title="项目群", body="Alice: 你好", conversation_type="group",
+    )
+    old_trigger = policy.evaluate_event(
+        package="com.tencent.mm", event_type="notification",
+        title="项目群", body="Alice: @Void_DRS 你好", conversation_type="group",
+    )
+    private = policy.evaluate_event(
+        package="com.tencent.mm", event_type="notification",
+        title="Alice", body="你好", conversation_type="private",
+    )
+
+    assert mentioned.is_auto and mentioned.instruction_source
+    assert unmentioned.is_ignore
+    assert old_trigger.is_ignore
+    assert private.is_auto and private.instruction_source
+
+
 def test_at_trigger_still_wins_for_group_conversation():
     policy = _parse_config({
         "default_behavior": "report",

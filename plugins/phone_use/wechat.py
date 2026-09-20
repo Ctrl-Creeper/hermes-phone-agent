@@ -880,6 +880,45 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
             meta={"delivery_attempted": True, "delivery_status": "uncertain"},
         )
 
+    # ADB reports success when it injects a tap, even if WeChat drops that
+    # input while the keyboard or composer is still transitioning. Only retry
+    # when fresh captures keep showing the Send button: after a real send the
+    # draft clears and that button disappears. Use its current coordinates so
+    # a refreshed OCR element index cannot point at a different control.
+    if not _contains_reply(sent.capture, text) and _find_send(sent.capture) is not None:
+        sent.capture = _settle_capture(
+            backend,
+            sent.capture,
+            lambda value: (
+                _contains_reply(value, text) or _find_send(value) is None
+            ),
+            attempts=2,
+        )
+        retry_send = _find_send(sent.capture)
+        if not _contains_reply(sent.capture, text) and retry_send is not None:
+            retry_x, retry_y = retry_send.center()
+            logger.warning(
+                "WeChat Send remained visible after tap; retrying at (%d, %d)",
+                retry_x,
+                retry_y,
+            )
+            sent = _run_and_capture(
+                backend,
+                "tap",
+                lambda: backend.tap(x=retry_x, y=retry_y),
+            )
+            if not sent.ok or sent.capture is None:
+                return ActionResult(
+                    ok=False,
+                    action="wechat_reply",
+                    message=sent.message or "WeChat send retry failed",
+                    capture=sent.capture,
+                    meta={
+                        "delivery_attempted": True,
+                        "delivery_status": "uncertain",
+                    },
+                )
+
     sent.capture = _settle_capture(
         backend, sent.capture,
         lambda value: _contains_reply(value, text),

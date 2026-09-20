@@ -1711,6 +1711,69 @@ def test_wechat_reply_waits_for_send_button_after_paste_transition():
     assert captures == []
 
 
+def test_wechat_reply_retries_send_when_first_tap_leaves_draft_visible():
+    list_page = [UIElement(
+        index=1, class_name="host.ocr.Text", text="Example Chat",
+        bounds=(180, 320, 520, 390), clickable=True,
+    )]
+    chat_page = [
+        UIElement(
+            index=1, class_name="host.ocr.Text", text="Example Chat",
+            bounds=(320, 104, 756, 157),
+        ),
+        UIElement(
+            index=2, class_name="host.ocr.MessageInput",
+            text="[WeChat message input]", bounds=(110, 2165, 720, 2325),
+            clickable=True, focusable=True,
+        ),
+    ]
+    send_page = [*chat_page, UIElement(
+        index=3, class_name="host.ocr.Text", text="Send",
+        bounds=(933, 1422, 1035, 1466), clickable=True,
+    )]
+    reply_page = [*chat_page, UIElement(
+        index=4, class_name="host.ocr.Text", text="hello",
+        bounds=(760, 1780, 1000, 1880),
+    )]
+    state = {"capture_count": 0, "send_taps": 0}
+
+    class Backend:
+        def launch_app(self, package, activity=None):
+            return phone_tool.ActionResult(ok=True, action="launch_app")
+
+        def capture(self, mode):
+            state["capture_count"] += 1
+            if state["capture_count"] == 1:
+                elements = list_page
+            elif state["capture_count"] == 2:
+                elements = chat_page
+            elif state["send_taps"] >= 2:
+                elements = reply_page
+            else:
+                elements = send_page
+            return phone_tool.CaptureResult(
+                mode=mode, width=1080, height=2400,
+                elements=elements, current_package="com.tencent.mm",
+            )
+
+        def tap(self, *, element=None, x=None, y=None):
+            if element == 3 or (x, y) == (984, 1444):
+                state["send_taps"] += 1
+            return phone_tool.ActionResult(ok=True, action="tap")
+
+        def set_text(self, text, element=None):
+            return phone_tool.ActionResult(ok=True, action="set_text")
+
+        def keyevent(self, keycode):
+            return phone_tool.ActionResult(ok=True, action="keyevent")
+
+    result = wechat_module._reply_once(Backend(), "Example Chat", "hello")
+
+    assert result.ok is True
+    assert result.meta["delivery_status"] == "confirmed"
+    assert state["send_taps"] == 2
+
+
 def test_wechat_prepare_text_input_does_not_run_slow_ocr_before_paste():
     chat_page = phone_tool.CaptureResult(
         mode="hierarchy", width=1080, height=2400,

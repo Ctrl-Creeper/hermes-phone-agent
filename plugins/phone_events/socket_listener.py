@@ -210,11 +210,15 @@ class SocketListener:
                 data = conn.recv(4096)
             except socket.timeout:
                 continue
-            except OSError:
-                break
+            except OSError as exc:
+                if self._stop_event.is_set():
+                    break
+                raise ConnectionError("helper socket read failed") from exc
             if not data:
+                if self._stop_event.is_set():
+                    break
                 logger.warning("helper socket closed by peer")
-                break
+                raise ConnectionError("helper socket closed by peer")
             buf += data
 
             while b"\n" in buf:

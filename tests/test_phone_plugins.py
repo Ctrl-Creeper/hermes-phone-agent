@@ -816,6 +816,46 @@ def test_socket_listener_restarts_helper_after_connection_failure(monkeypatch):
     assert recovery_steps == ["forward", "service"]
 
 
+def test_socket_listener_restarts_helper_after_peer_eof(monkeypatch):
+    listener = SocketListener(serial="emulator-5554")
+    recovery_steps = []
+
+    class ClosedConnection:
+        def settimeout(self, seconds):
+            pass
+
+        def sendall(self, data):
+            pass
+
+        def recv(self, size):
+            return b""
+
+        def close(self):
+            pass
+
+    def stop_after_backoff(seconds):
+        listener._stop_event.set()
+        return True
+
+    monkeypatch.setattr(
+        "plugins.phone_events.socket_listener.socket.create_connection",
+        lambda *args, **kwargs: ClosedConnection(),
+    )
+    monkeypatch.setattr(
+        listener, "_setup_adb_forward",
+        lambda: recovery_steps.append("forward"),
+    )
+    monkeypatch.setattr(
+        listener, "_start_helper_service",
+        lambda: recovery_steps.append("service"),
+    )
+    monkeypatch.setattr(listener._stop_event, "wait", stop_after_backoff)
+
+    listener._run()
+
+    assert recovery_steps == ["forward", "service"]
+
+
 def test_phone_event_has_no_fake_telegram_reply_target(monkeypatch):
     hermes_source = Path.home() / ".hermes" / "hermes-agent"
     if not hermes_source.is_dir():
@@ -4079,7 +4119,8 @@ def test_socket_listener_marks_helper_authenticated_on_ack():
             self.sent.append(json.loads(data))
 
     connection = Connection()
-    listener._read_events(connection, nonce=nonce)
+    with pytest.raises(ConnectionError, match="closed by peer"):
+        listener._read_events(connection, nonce=nonce)
 
     assert listener.is_authenticated
     assert connection.sent == [{

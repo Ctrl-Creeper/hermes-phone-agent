@@ -19,6 +19,13 @@ jobs:
     env:
       PHONE_MCP_SYNC_TOKEN: ${{ secrets.PHONE_MCP_SYNC_TOKEN }}
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate helper release contract
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/validate_phone_control_manifest.py
+
       - name: Trigger downstream sync
         if: env.PHONE_MCP_SYNC_TOKEN != ''
         run: |

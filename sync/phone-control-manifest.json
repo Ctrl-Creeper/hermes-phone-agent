@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "source_repository": "Ctrl-Creeper/hermes-phone-agent",
+  "core_files": [
+    {"source": "plugins/phone_use/backend.py", "target": "phone_control/backend.py"},
+    {"source": "plugins/phone_use/adb_backend.py", "target": "phone_control/adb_backend.py"},
+    {"source": "plugins/phone_use/appium_backend.py", "target": "phone_control/appium_backend.py"},
+    {"source": "plugins/phone_use/appium_manager.py", "target": "phone_control/appium_manager.py"},
+    {"source": "plugins/phone_use/host_ocr.py", "target": "phone_control/host_ocr.py"},
+    {"source": "plugins/phone_use/native/phone_ocr.swift", "target": "phone_control/phone_ocr.swift"},
+    {"source": "plugins/phone_use/policy.py", "target": "phone_control/policy.py"},
+    {"source": "plugins/phone_use/sanitize.py", "target": "phone_control/sanitize.py"},
+    {"source": "plugins/phone_use/wechat.py", "target": "phone_control/wechat.py"},
+    {"source": "plugins/phone_use/wechat_context.py", "target": "phone_control/wechat_context.py"},
+    {"source": "phone-policy.yaml", "target": "phone-policy.yaml"}
+  ],
+  "helper": {
+    "package": "com.hermes.phoneagent",
+    "transport_contract": "helper-socket-hmac-v1",
+    "version": "0.2.4",
+    "version_code": 6,
+    "release_tag": "v0.2.4",
+    "asset": "hermes-phone-agent-v0.2.4.apk",
+    "sha256": "6223522d3e060784ae57184cc2ef6eead4c452cad3b32f251390f177bdbca68f"
+  }
+}

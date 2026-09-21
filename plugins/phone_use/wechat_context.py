@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -9,6 +10,8 @@ from typing import Optional
 
 from .backend import ActionResult, CaptureResult, PhoneBackend
 from .wechat import open_chat
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -29,7 +32,6 @@ def _image_bubbles(capture: CaptureResult) -> list:
     bottom = capture.height - 235
     candidates = []
     for element in capture.elements:
-        label = (element.text or element.content_desc or "").strip().casefold()
         class_name = (element.class_name or "").casefold()
         resource_id = (element.resource_id or "").casefold()
         left, y1, right, y2 = element.bounds

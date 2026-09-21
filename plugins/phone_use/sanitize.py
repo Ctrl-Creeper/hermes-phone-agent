@@ -9,7 +9,6 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-
 # Characters that have special meaning in an Android shell context.
 # We reject arguments containing these rather than trying to escape them —
 # escaping is error-prone and a single miss is a command injection.

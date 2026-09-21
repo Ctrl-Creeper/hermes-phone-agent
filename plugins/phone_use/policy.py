@@ -22,7 +22,7 @@ import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Set
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional
 
 logger = logging.getLogger(__name__)
 

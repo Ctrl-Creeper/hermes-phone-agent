@@ -3196,6 +3196,40 @@ def test_wechat_non_image_destination_is_rejected_and_returns_to_chat():
     assert calls == [("keyevent", "BACK")]
 
 
+def test_wechat_non_image_recovery_failure_is_logged_and_rejected(caplog):
+    from plugins.phone_use import wechat_context
+
+    image = UIElement(
+        index=2, class_name="host.vision.ImageCandidate",
+        bounds=(185, 167, 528, 628), clickable=True,
+    )
+
+    class Backend:
+        def tap(self, **kwargs):
+            return phone_tool.ActionResult(ok=True, action="tap")
+
+        def wait(self, seconds):
+            return phone_tool.ActionResult(ok=True, action="wait")
+
+        def capture(self, mode):
+            return phone_tool.CaptureResult(
+                mode=mode, width=1080, height=2400,
+                current_package="com.tencent.mm",
+                current_activity=".plugin.lite.ui.WxaLiteAppLiteUI",
+                png_b64="bm90LWEtcGhvdG8=",
+            )
+
+        def keyevent(self, keycode):
+            raise RuntimeError("back failed")
+
+    with caplog.at_level("WARNING"):
+        assert wechat_context._open_image_bubble(
+            Backend(), image, chat_activity=".ui.LauncherUI",
+        ) is None
+
+    assert "Could not recover from a non-image WeChat destination" in caplog.text
+
+
 def test_wechat_reply_returns_home_when_chat_cannot_be_found():
     calls = []
 

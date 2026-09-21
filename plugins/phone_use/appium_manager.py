@@ -8,6 +8,7 @@ all methods degrade gracefully — the hybrid backend falls back to ADB.
 from __future__ import annotations
 
 import atexit
+import importlib.util
 import logging
 import os
 import shutil
@@ -29,11 +30,7 @@ def appium_installed() -> bool:
 
 
 def appium_python_client_available() -> bool:
-    try:
-        import appium  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    return importlib.util.find_spec("appium") is not None
 
 
 def _port_in_use(port: int) -> bool:
@@ -127,8 +124,8 @@ class AppiumServer:
 
     def _wait_for_ready(self) -> bool:
         """Poll the Appium status endpoint until it responds."""
-        import urllib.request
         import urllib.error
+        import urllib.request
 
         deadline = time.monotonic() + _STARTUP_TIMEOUT
         url = f"{self.url}{_HEALTH_PATH}"

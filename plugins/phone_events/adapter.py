@@ -11,11 +11,14 @@ that allows a configured inbox event to be interpreted as a request.
 
 from __future__ import annotations
 
-import json
+import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 import unicodedata
@@ -75,6 +78,52 @@ _FRIEND_REQUEST_BODIES = frozenset({
     "申请添加你为好友",
 })
 _AMBIGUOUS_WECHAT_TITLES = frozenset({"wechat", "微信", "group chat", "群聊"})
+
+
+def _resolve_adb_serial(serial: Optional[str] = None) -> str:
+    """Resolve one authorized device before starting event transports."""
+    if shutil.which("adb") is None:
+        raise RuntimeError("adb not found on PATH")
+    result = subprocess.run(
+        ["adb", "devices", "-l"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            (result.stderr or result.stdout).strip() or "adb devices failed"
+        )
+    states = {}
+    for line in result.stdout.splitlines()[1:]:
+        columns = line.split()
+        if len(columns) >= 2:
+            states[columns[0]] = columns[1]
+
+    configured = str(serial or "").strip()
+    if configured:
+        state = states.get(configured)
+        if state == "device":
+            return configured
+        if state == "unauthorized":
+            raise RuntimeError(f"Android device {configured!r} is unauthorized")
+        if state:
+            raise RuntimeError(
+                f"Android device {configured!r} is not ready (state: {state})"
+            )
+        raise RuntimeError(f"Android device {configured!r} is not connected")
+
+    authorized = [device for device, state in states.items() if state == "device"]
+    if len(authorized) == 1:
+        return authorized[0]
+    if len(authorized) > 1:
+        raise RuntimeError(
+            "Multiple authorized Android devices are connected; configure "
+            "platforms.phone_events.extra.serial."
+        )
+    if any(state == "unauthorized" for state in states.values()):
+        raise RuntimeError("No authorized Android device; approve the ADB connection.")
+    raise RuntimeError("No Android device/emulator is connected.")
 
 
 def _wechat_friend_requester(phone_event: Any) -> Optional[str]:
@@ -386,6 +435,7 @@ class PhoneEventAdapter:
         self._serial = str(
             extra.get("serial") or os.environ.get("ANDROID_SERIAL", "")
         ).strip() or None
+        self._serial_was_configured = self._serial is not None
         self._redact_otp = os.environ.get(
             "PHONE_EVENTS_REDACT_OTP", "true"
         ).lower() in ("true", "1", "yes")
@@ -432,6 +482,16 @@ class PhoneEventAdapter:
             return False
 
         self._event_filter = EventFilter.from_env()
+
+        configured_serial = (
+            self._serial
+            if getattr(self, "_serial_was_configured", self._serial is not None)
+            else None
+        )
+        self._serial = await asyncio.to_thread(
+            _resolve_adb_serial,
+            configured_serial,
+        )
 
         self._logcat_monitor = LogcatMonitor(
             serial=self._serial, on_event=self._on_raw_event,

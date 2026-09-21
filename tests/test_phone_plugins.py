@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from plugins.phone_use import adb_backend as adb_module
-from plugins.phone_use.adb_backend import AdbBackend
+from plugins.phone_use.adb_backend import AdbBackend, resolve_adb_serial
 from plugins.phone_use.appium_manager import AppiumServer
 from plugins.phone_use.backend import DeviceInfo, UIElement
 from plugins.phone_use.sanitize import validate_coordinate
@@ -28,7 +28,11 @@ from plugins.phone_use.policy import (
 )
 from plugins.phone_events.socket_listener import SocketListener
 from plugins.phone_events import adapter as event_adapter
-from plugins.phone_events.adapter import PhoneEventAdapter, _wrap_phone_data
+from plugins.phone_events.adapter import (
+    PhoneEventAdapter,
+    _resolve_adb_serial as resolve_event_adb_serial,
+    _wrap_phone_data,
+)
 from plugins.phone_events.event_filter import EventFilter, PhoneEvent
 from plugins.phone_events.logcat_monitor import LogcatMonitor
 
@@ -47,6 +51,65 @@ def test_current_app_reads_top_resumed_activity_on_android_16():
         "package": "com.example.app",
         "activity": ".MainActivity",
     }
+
+
+@pytest.mark.parametrize("resolver", [resolve_adb_serial, resolve_event_adb_serial])
+def test_phone_device_auto_selection_rejects_multiple_devices(monkeypatch, resolver):
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: "/usr/bin/adb" if name == "adb" else None,
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["adb", "devices"],
+            0,
+            "List of devices attached\nemulator-5554\tdevice\nemulator-5556\tdevice\n",
+            "",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Multiple authorized Android devices"):
+        resolver()
+
+
+@pytest.mark.parametrize("resolver", [resolve_adb_serial, resolve_event_adb_serial])
+def test_phone_device_auto_selection_accepts_one_device(monkeypatch, resolver):
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: "/usr/bin/adb" if name == "adb" else None,
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["adb", "devices"],
+            0,
+            "List of devices attached\nemulator-5554\tdevice product:sdk\n",
+            "",
+        ),
+    )
+
+    assert resolver() == "emulator-5554"
+
+
+@pytest.mark.parametrize("resolver", [resolve_adb_serial, resolve_event_adb_serial])
+def test_phone_device_selection_validates_configured_serial(monkeypatch, resolver):
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: "/usr/bin/adb" if name == "adb" else None,
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["adb", "devices"],
+            0,
+            "List of devices attached\nemulator-5554\tunauthorized\n",
+            "",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="unauthorized"):
+        resolver("emulator-5554")
 
 
 def test_appium_server_running_check_does_not_deadlock_inside_start(monkeypatch):
@@ -4096,6 +4159,11 @@ def test_phone_event_connect_rolls_back_partial_start(monkeypatch):
     )
     monkeypatch.setattr(
         "plugins.phone_events.socket_listener.SocketListener", SocketListener,
+    )
+    monkeypatch.setattr(
+        event_adapter,
+        "_resolve_adb_serial",
+        lambda serial=None: serial or "emulator-5554",
     )
 
     adapter = object.__new__(PhoneEventAdapter)

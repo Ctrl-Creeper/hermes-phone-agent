@@ -26,6 +26,7 @@ from .policy import bind_event_policy, get_event_policy, get_policy
 from .wechat import open_chat as open_wechat_chat
 from .wechat import reply as reply_to_wechat
 from .wechat import accept_friend_request as accept_wechat_friend_request
+from .wechat import favorite_message
 from .wechat_context import collect_context as collect_wechat_context
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ _SAFE_ACTIONS = frozenset({
 # foreground app — agent-supplied 'package' is ignored to prevent bypass.
 _PACKAGE_AWARE_ACTIONS = frozenset({"launch_app", "stop_app"})
 _FIXED_PACKAGE_ACTIONS = {
+    "wechat_favorite": "com.tencent.mm",
     "wechat_open_chat": "com.tencent.mm",
     "wechat_reply": "com.tencent.mm",
     "wechat_collect_context": "com.tencent.mm",
@@ -64,7 +66,7 @@ _APPROVAL_REQUIRED = frozenset({
 
 # These always prompt, even if session-auto-approve is on.
 _ALWAYS_PROMPT = frozenset({
-    "install_apk", "shell", "wechat_reply",
+    "install_apk", "shell", "wechat_reply", "wechat_favorite",
 })
 
 _WORKFLOW_ACTIONS = _APPROVAL_REQUIRED
@@ -604,6 +606,8 @@ def _request_approval(
 
 
 def _summarize_action(action: str, args: Dict[str, Any]) -> str:
+    if action == 'wechat_favorite':
+        return f"favorite exact message {args.get('message_text')!r} in WeChat {args.get('chat')!r}"
     if action in ("tap", "double_tap", "long_press"):
         if args.get("element") is not None:
             return f"{action} element #{args['element']}"
@@ -643,6 +647,8 @@ def _summarize_action(action: str, args: Dict[str, Any]) -> str:
 
 
 def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
+    if action == 'wechat_favorite':
+        return _text_response(favorite_message(backend, args.get('chat', ''), args.get('message_text', '')))
     if action == "capture":
         mode = args.get("mode", "som")
         if mode not in ("som", "screenshot", "hierarchy"):

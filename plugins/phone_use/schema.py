@@ -26,6 +26,7 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
             "action": {
                 "type": "string",
                 "enum": [
+                    "wechat_favorite",
                     "capture", "tap", "double_tap", "long_press",
                     "swipe", "type", "clear_text", "set_text",
                     "keyevent", "launch_app", "stop_app", "list_apps",
@@ -128,6 +129,10 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                     "Visible WeChat conversation title for wechat_open_chat "
                     "or wechat_reply."
                 ),
+            },
+            "message_text": {
+                "type": "string", "minLength": 1, "maxLength": 2000,
+                "description": "Exact observed visible text for wechat_favorite. Duplicate or absent originals are rejected. Requires approval; only a fresh success notice confirms completion. Never automatically repeat uncertain favorites.",
             },
             "scope": {
                 "type": "string",

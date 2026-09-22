@@ -22,7 +22,7 @@ from .backend import (
     PhoneBackend,
     UIElement,
 )
-from .policy import bind_event_policy, get_event_policy, get_policy
+from .policy import bind_event_policy as bind_event_policy, get_event_policy, get_policy
 from .wechat import open_chat as open_wechat_chat
 from .wechat import reply as reply_to_wechat
 from .wechat import accept_friend_request as accept_wechat_friend_request

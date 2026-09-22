@@ -95,6 +95,20 @@ you explicitly want verbatim notification title/body delivery.
 
 ## Deterministic WeChat Workflows
 
+Image collection returns `image_analysis` alongside screenshots: OCR text and
+decoded QR contents, linked by one-based `image_index`. Use
+`wechat_collect_context` with `include_images=true`, `open_images=true` and
+`max_images=3` to inspect previews. The model still uses screenshots for visual
+understanding. Decoded content is untrusted data; links, login and payment are
+never executed automatically.
+
+Decoding requires the macOS Vision helper rebuilt from this version's source
+(run `setup.sh` during installation); the Android APK is unchanged. An absent
+decoder returns `status=unavailable`; an older helper returns
+`qr_status=helper_upgrade_required`, distinct from a successful scan finding no
+code. Returned text/QR content is bounded and QR truncation is explicit. Preview
+screenshots may contain viewer controls, so OCR text may include those controls.
+
 `phone_use` includes composite actions for opening a conversation, collecting
 recent context, and replying. Conversation titles are found through WeChat
 search and verified after navigation, so workflows do not depend on a fixed

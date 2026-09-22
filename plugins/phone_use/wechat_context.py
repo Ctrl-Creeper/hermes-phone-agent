@@ -10,6 +10,7 @@ from typing import Optional
 
 from .backend import ActionResult, CaptureResult, PhoneBackend
 from .wechat import open_chat
+from .host_ocr import analyze_image
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,7 @@ def collect_context(
     current = opened.capture
     combined: list[str] = []
     screenshots: list[str] = []
+    image_analysis: list[dict] = []
     opened_images = 0
     max_images = max(0, min(int(max_images), 5))
     seen_image_bubbles: set[tuple[str, tuple[int, int, int, int]]] = set()
@@ -249,6 +251,8 @@ def collect_context(
             )
             if visual.png_b64 and not open_images and len(screenshots) < 5:
                 screenshots.append(visual.png_b64)
+                image_analysis.append({"image_index": len(screenshots), "source": "chat_screenshot",
+                                       **analyze_image(visual.png_b64)})
             current = visual
 
             if open_images and opened_images < max_images:
@@ -266,6 +270,8 @@ def collect_context(
                     )
                     if image:
                         screenshots.append(image)
+                        image_analysis.append({"image_index": len(screenshots), "source": "image_preview",
+                                               **analyze_image(image)})
                         opened_images += 1
                     if opened_images >= max_images:
                         break
@@ -355,6 +361,7 @@ def collect_context(
         "stop_reason": stop_reason,
         "screenshots": screenshots,
         "image_count": opened_images if open_images else len(screenshots),
+        "image_analysis": image_analysis,
     }
     return ActionResult(
         ok=True,

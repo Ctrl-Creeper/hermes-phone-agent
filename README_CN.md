@@ -98,6 +98,16 @@ platforms:
 
 ## 确定性微信工作流
 
+读取图片时同时返回截图及 `image_analysis`：OCR 文字、二维码内容，通过从 1 开始的
+`image_index` 对应截图。调用 `wechat_collect_context` 并设置 `include_images=true`、
+`open_images=true`、`max_images=3` 即可。模型继续通过截图理解图片；二维码仅解码为
+数据，不自动打开链接、登录或支付。
+
+解码依赖 macOS Vision；安装时运行 `setup.sh` 重建新版宿主 OCR 程序即可，Android
+APK 无需更新。缺少解码器返回 `unavailable`，旧程序返回 `helper_upgrade_required`，
+不会误报成“没有二维码”。返回内容有长度上限，二维码截断会标注。预览截图可能带有
+界面控件，提取文字不保证全部来自原图。
+
 `phone_use` 提供打开会话、收集最近聊天记录和回复消息的组合操作。它通过
 微信搜索定位会话，并在进入后校验标题，不依赖会话列表中的固定位置。对于
 无障碍控件树为空或不完整的微信界面，会自动使用宿主机 OCR。

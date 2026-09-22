@@ -8,6 +8,7 @@ through sanitize.py before reaching subprocess.
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import os
 import re
@@ -15,6 +16,9 @@ import shutil
 import subprocess
 import tempfile
 import time
+import stat
+import uuid
+from pathlib import Path
 
 # Prefer defusedxml to harden against XXE / billion-laughs in the
 # uiautomator XML dump. Fall back to stdlib with a warning if unavailable.
@@ -56,6 +60,24 @@ _REMOTE_SCREENSHOT = "/data/local/tmp/hermes_screen.png"
 _REMOTE_UIDUMP = "/data/local/tmp/hermes_uidump.xml"
 _HELPER_SERVICE = "com.hermes.phoneagent/.EventSocketService"
 _SET_CLIPBOARD_ACTION = "com.hermes.phoneagent.SET_CLIPBOARD"
+
+
+def read_attachment(path: str) -> tuple[dict, bytes]:
+    """Read one bounded regular file; metadata and bytes refer to the same read."""
+    source = Path(path).expanduser().resolve(strict=True)
+    fd = os.open(source, os.O_RDONLY | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 20 * 1024 * 1024:
+            raise ValueError('Attachment must be a nonempty regular file of at most 20 MiB')
+        data = stream.read(20 * 1024 * 1024 + 1)
+    if not data or len(data) > 20 * 1024 * 1024:
+        raise ValueError('Attachment size changed or exceeds 20 MiB')
+    suffix = source.suffix.lower()
+    if not re.fullmatch(r'\.[a-z0-9]{1,10}', suffix):
+        suffix = '.bin'
+    return {'path': str(source), 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
+            'suffix': suffix}, data
 
 
 def adb_available() -> bool:
@@ -134,6 +156,25 @@ def _hierarchy_is_usable(elements: List[UIElement]) -> bool:
 
 
 class AdbBackend(PhoneBackend):
+
+    def stage_attachment(self, path: str, sha256: str) -> dict:
+        """Copy exactly the approved bytes to one uniquely named Download file."""
+        metadata, data = read_attachment(path)
+        if metadata['sha256'] != sha256:
+            raise ValueError('Attachment changed since approval; prepare it again')
+        name = 'hermes-' + uuid.uuid4().hex + metadata['suffix']
+        remote = '/sdcard/Download/' + name
+        with tempfile.TemporaryDirectory(prefix='phone-attachment-') as directory:
+            snapshot = Path(directory) / name
+            snapshot.write_bytes(data)
+            result = self._adb('push', str(snapshot), remote, timeout=60)
+        if result.returncode:
+            raise RuntimeError('Could not stage attachment on Android')
+        verified = self._adb_shell('sha256sum', remote)
+        if verified.returncode or verified.stdout.split()[:1] != [sha256]:
+            self._adb_shell('rm', '-f', remote)
+            raise RuntimeError('Android attachment checksum mismatch')
+        return {'name': name, 'path': remote, 'sha256': sha256, 'size': len(data)}
 
     def __init__(self, serial: Optional[str] = None):
         self._serial = serial or os.environ.get("ANDROID_SERIAL")

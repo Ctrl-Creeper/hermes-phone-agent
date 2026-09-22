@@ -64,6 +64,9 @@ class HybridBackend(PhoneBackend):
     def device_info(self) -> DeviceInfo:
         return self._adb.device_info()
 
+    def stage_attachment(self, path: str, sha256: str) -> dict:
+        return self._adb.stage_attachment(path, sha256)
+
     # ── Capture (ADB primary, Appium fallback) ─────────────────────
 
     def capture(self, mode: str = "som") -> CaptureResult:

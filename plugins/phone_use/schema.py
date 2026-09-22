@@ -26,6 +26,7 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
             "action": {
                 "type": "string",
                 "enum": [
+                    "wechat_send_attachment",
                     "capture", "tap", "double_tap", "long_press",
                     "swipe", "type", "clear_text", "set_text",
                     "keyevent", "launch_app", "stop_app", "list_apps",
@@ -128,6 +129,10 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                     "Visible WeChat conversation title for wechat_open_chat "
                     "or wechat_reply."
                 ),
+            },
+            "file_path": {
+                "type": "string",
+                "description": "Local regular file for wechat_send_attachment, up to 20 MiB. Images are sent as original files. Requires explicit approval binding chat, path, size and checksum. Unsupported picker/summary layouts stop before sending. Delivery uncertainty must never be retried automatically.",
             },
             "scope": {
                 "type": "string",

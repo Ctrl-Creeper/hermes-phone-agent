@@ -26,6 +26,8 @@ from .policy import bind_event_policy, get_event_policy, get_policy
 from .wechat import open_chat as open_wechat_chat
 from .wechat import reply as reply_to_wechat
 from .wechat import accept_friend_request as accept_wechat_friend_request
+from .wechat import send_attachment
+from .adb_backend import read_attachment
 from .wechat_context import collect_context as collect_wechat_context
 
 logger = logging.getLogger(__name__)
@@ -49,6 +51,7 @@ _SAFE_ACTIONS = frozenset({
 # foreground app — agent-supplied 'package' is ignored to prevent bypass.
 _PACKAGE_AWARE_ACTIONS = frozenset({"launch_app", "stop_app"})
 _FIXED_PACKAGE_ACTIONS = {
+    "wechat_send_attachment": "com.tencent.mm",
     "wechat_open_chat": "com.tencent.mm",
     "wechat_reply": "com.tencent.mm",
     "wechat_collect_context": "com.tencent.mm",
@@ -64,7 +67,7 @@ _APPROVAL_REQUIRED = frozenset({
 
 # These always prompt, even if session-auto-approve is on.
 _ALWAYS_PROMPT = frozenset({
-    "install_apk", "shell", "wechat_reply",
+    "install_apk", "shell", "wechat_reply", "wechat_send_attachment",
 })
 
 _WORKFLOW_ACTIONS = _APPROVAL_REQUIRED
@@ -403,6 +406,13 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
             ),
         }), task_id, session_id, workflow_active)
 
+    if action == 'wechat_send_attachment':
+        try:
+            attachment, _ = read_attachment(args.get('file_path', ''))
+            args = {**args, 'file_path': attachment['path'], '_attachment': attachment}
+        except (OSError, ValueError, TypeError) as exc:
+            return json.dumps({'ok': False, 'error': str(exc)})
+
     # Approval gate. Globally restricted actions require a fresh approval even
     # in an auto event; ordinary interactive actions may run under an explicit
     # auto event allowlist.
@@ -604,6 +614,10 @@ def _request_approval(
 
 
 def _summarize_action(action: str, args: Dict[str, Any]) -> str:
+    if action == 'wechat_send_attachment':
+        attachment = args.get('_attachment', {})
+        return (f"send file {args.get('file_path')!r} to WeChat {args.get('chat')!r}; "
+                f"size={attachment.get('size')} SHA-256={attachment.get('sha256')}")
     if action in ("tap", "double_tap", "long_press"):
         if args.get("element") is not None:
             return f"{action} element #{args['element']}"
@@ -643,6 +657,12 @@ def _summarize_action(action: str, args: Dict[str, Any]) -> str:
 
 
 def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
+    if action == 'wechat_send_attachment':
+        attachment = args.get('_attachment')
+        if not attachment:
+            return json.dumps({'ok': False, 'error': 'Attachment preflight required'})
+        return _text_response(send_attachment(backend, args.get('chat', ''),
+                                             attachment['path'], attachment['sha256']))
     if action == "capture":
         mode = args.get("mode", "som")
         if mode not in ("som", "screenshot", "hierarchy"):

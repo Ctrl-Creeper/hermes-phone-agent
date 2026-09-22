@@ -95,6 +95,8 @@ you explicitly want verbatim notification title/body delivery.
 
 ## Deterministic WeChat Workflows
 
+Experimental [attachment sending](ATTACHMENTS.md) adds checksum-bound file/original-image delivery through the File picker; device validation is pending.
+
 `phone_use` includes composite actions for opening a conversation, collecting
 recent context, and replying. Conversation titles are found through WeChat
 search and verified after navigation, so workflows do not depend on a fixed

@@ -760,7 +760,18 @@ def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
     if action == "wechat_reply":
         chat = args.get("chat", "")
         text = args.get("text", "")
-        res = reply_to_wechat(backend, chat, text)
+        event_policy = get_event_policy()
+        conversation_type = ""
+        if (event_policy is not None and event_policy.is_auto
+                and event_policy.instruction_source):
+            conversation_type = event_policy.conversation_type
+        if conversation_type:
+            res = reply_to_wechat(
+                backend, chat, text,
+                exit_inbox_conversation_type=conversation_type,
+            )
+        else:
+            res = reply_to_wechat(backend, chat, text)
         logger.info(
             "wechat_reply outcome: ok=%s chat=%r detail=%s",
             res.ok,

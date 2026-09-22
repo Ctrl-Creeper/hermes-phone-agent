@@ -6,6 +6,7 @@ import logging
 import re
 import time
 import unicodedata
+from collections import Counter
 from difflib import SequenceMatcher
 from typing import Callable, Optional
 
@@ -40,6 +41,73 @@ _ADDED_LABELS = frozenset({"added", "accepted", "已添加", "已通过"})
 _SYMBOL_CHAT_HINT_TTL_SECONDS = 120.0
 _symbol_chat_hint: Optional[tuple[str, str, float]] = None
 _EMOJI_PLACEHOLDER = re.compile(r"\[(?:emoji|sticker|表情)\]", re.IGNORECASE)
+_EXIT_INBOX_GROUP_MENTION = re.compile(r"@void_drsai(?![a-z0-9_])", re.IGNORECASE)
+_EXIT_INBOX_QUOTE_PREFIX = re.compile(r"^[^:：]{1,80}[:：]\s*")
+_exit_inbox_callback: Optional[Callable[[str, str, list[dict]], None]] = None
+
+
+def set_exit_inbox_callback(callback: Optional[Callable[[str, str, list[dict]], None]]) -> None:
+    """Register the host-owned dispatcher for deferred foreground messages."""
+    global _exit_inbox_callback
+    _exit_inbox_callback = callback
+
+
+def _exit_inbox_text(element: UIElement, capture: CaptureResult) -> str:
+    """Return a confirmed incoming bubble's body, otherwise an empty string."""
+    if element.attributes.get("message_direction") != "incoming":
+        return ""
+    entry = _find_input(capture.elements)
+    bottom = (entry.bounds[1] if entry else capture.height) - int(capture.height * .04)
+    text = re.sub(r"\s+", " ", _label(element)).strip()
+    if (
+        not text
+        or element.bounds[1] < int(capture.height * .12)
+        or element.bounds[3] > bottom
+        or element.class_name == _MESSAGE_INPUT_CLASS
+        or re.fullmatch(r"\d{1,2}:\d{2}(?:\s*[AP]M)?", text, re.I)
+    ):
+        return ""
+    return text
+
+
+def capture_exit_inbox_baseline(capture: CaptureResult) -> Counter[str]:
+    """Snapshot visible incoming bubble text before an automated reply."""
+    return Counter(
+        unicodedata.normalize("NFC", _exit_inbox_text(element, capture)).casefold()
+        for element in capture.elements
+        if _exit_inbox_text(element, capture)
+    )
+
+
+def find_exit_inbox_messages(
+    baseline: Counter[str], capture: CaptureResult, *, conversation_type: str,
+) -> list[dict]:
+    """Return only confirmed newly visible inbound tasks before leaving WeChat.
+
+    OCR has no stable WeChat message IDs. Direction metadata is therefore
+    mandatory, and a group trigger must be the actual message body rather than
+    a quoted preview (which normally begins with ``sender:``).
+    """
+    kind = str(conversation_type or "").strip().casefold()
+    if capture.current_package != WECHAT_PACKAGE or kind not in {"group", "private"}:
+        return []
+    remaining = Counter(baseline)
+    found = []
+    for element in sorted(capture.elements, key=lambda item: (item.bounds[1], item.bounds[0])):
+        text = _exit_inbox_text(element, capture)
+        if not text:
+            continue
+        key = unicodedata.normalize("NFC", text).casefold()
+        if remaining[key]:
+            remaining[key] -= 1
+            continue
+        if kind == "group" and (
+            _EXIT_INBOX_QUOTE_PREFIX.match(text) is not None
+            or _EXIT_INBOX_GROUP_MENTION.search(text) is None
+        ):
+            continue
+        found.append({"text": text, "direction": "incoming"})
+    return found
 
 
 def _has_emoji(value: str) -> bool:
@@ -908,7 +976,8 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
     )
 
 
-def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
+def _reply_once(backend: PhoneBackend, chat: str, text: str, *,
+                exit_inbox_conversation_type: str = "") -> ActionResult:
     opened = open_chat(backend, chat)
     if not opened.ok or opened.capture is None:
         return ActionResult(
@@ -916,19 +985,29 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
             capture=opened.capture,
         )
 
+    baseline = (
+        capture_exit_inbox_baseline(opened.capture)
+        if exit_inbox_conversation_type in {"group", "private"} else None
+    )
+
+    def with_baseline(result: ActionResult) -> ActionResult:
+        if baseline is not None:
+            result.meta["_exit_inbox_baseline"] = baseline
+        return result
+
     focused = _prepare_text_input(backend, opened.capture)
     if not focused.ok or focused.capture is None:
-        return ActionResult(
+        return with_baseline(ActionResult(
             ok=False, action="wechat_reply", message=focused.message,
             capture=focused.capture,
-        )
+        ))
 
     typed = _run_and_capture(backend, "set_text", lambda: backend.set_text(text))
     if not typed.ok or typed.capture is None:
-        return ActionResult(
+        return with_baseline(ActionResult(
             ok=False, action="wechat_reply", message=typed.message,
             capture=typed.capture,
-        )
+        ))
 
     typed.capture = _settle_capture(
         backend, typed.capture,
@@ -936,20 +1015,20 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
     )
     send = _find_send(typed.capture)
     if send is None:
-        return ActionResult(
+        return with_baseline(ActionResult(
             ok=False, action="wechat_reply",
             message="WeChat send button was not found after entering the reply",
             capture=typed.capture,
-        )
+        ))
 
     sent = _run_and_capture(backend, "tap", lambda: backend.tap(element=send.index))
     if not sent.ok or sent.capture is None:
-        return ActionResult(
+        return with_baseline(ActionResult(
             ok=False, action="wechat_reply",
             message=sent.message or "WeChat send action failed",
             capture=sent.capture,
             meta={"delivery_attempted": True, "delivery_status": "uncertain"},
-        )
+        ))
 
     # ADB reports success when it injects a tap, even if WeChat drops that
     # input while the keyboard or composer is still transitioning. Only retry
@@ -979,7 +1058,7 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
                 lambda: backend.tap(x=retry_x, y=retry_y),
             )
             if not sent.ok or sent.capture is None:
-                return ActionResult(
+                return with_baseline(ActionResult(
                     ok=False,
                     action="wechat_reply",
                     message=sent.message or "WeChat send retry failed",
@@ -988,20 +1067,20 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
                         "delivery_attempted": True,
                         "delivery_status": "uncertain",
                     },
-                )
+                ))
 
     sent.capture = _settle_capture(
         backend, sent.capture,
         lambda value: _contains_reply(value, text),
     )
     if _contains_reply(sent.capture, text):
-        return ActionResult(
+        return with_baseline(ActionResult(
             ok=True, action="wechat_reply",
             message=f"sent reply to WeChat chat {chat!r}", capture=sent.capture,
             meta={"delivery_attempted": True, "delivery_status": "confirmed"},
-        )
+        ))
 
-    return ActionResult(
+    return with_baseline(ActionResult(
         ok=False, action="wechat_reply",
         message=(
             "WeChat send was attempted, but delivery could not be confirmed; "
@@ -1009,10 +1088,11 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
         ),
         capture=sent.capture,
         meta={"delivery_attempted": True, "delivery_status": "uncertain"},
-    )
+    ))
 
 
-def reply(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
+def reply(backend: PhoneBackend, chat: str, text: str, *,
+          exit_inbox_conversation_type: str = "") -> ActionResult:
     """Open a WeChat chat, recover once if needed, and always return Home."""
     result: ActionResult = ActionResult(
         ok=False, action="wechat_reply", message="WeChat reply did not run"
@@ -1020,7 +1100,15 @@ def reply(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
     try:
         for attempt in range(2):
             try:
-                result = _reply_once(backend, chat, text)
+                if exit_inbox_conversation_type:
+                    result = _reply_once(
+                        backend, chat, text,
+                        exit_inbox_conversation_type=exit_inbox_conversation_type,
+                    )
+                else:
+                    # Keep the original positional call shape for existing
+                    # plugin integrations and their lightweight test doubles.
+                    result = _reply_once(backend, chat, text)
             except Exception as exc:
                 logger.exception("WeChat reply attempt %d failed", attempt + 1)
                 result = ActionResult(
@@ -1048,6 +1136,22 @@ def reply(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
         )
         return result
     finally:
+        baseline = result.meta.pop("_exit_inbox_baseline", None)
+        if baseline is not None:
+            try:
+                before_home = backend.capture(mode="hierarchy")
+                deferred = find_exit_inbox_messages(
+                    baseline, before_home,
+                    conversation_type=exit_inbox_conversation_type,
+                )
+                result.meta["exit_inbox_count"] = len(deferred)
+                if deferred and _exit_inbox_callback is not None:
+                    _exit_inbox_callback(chat, exit_inbox_conversation_type, deferred)
+            except Exception:
+                # This is a loss-prevention supplement. A failed scan must not
+                # alter the completed reply outcome or cause a resend.
+                logger.exception("WeChat exit inbox scan failed")
+                result.meta["exit_inbox_scan_failed"] = True
         home = _run_and_capture(
             backend,
             "keyevent",

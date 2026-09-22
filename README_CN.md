@@ -114,6 +114,8 @@ platforms:
 
 如需从 Claude、Codex、GPT、Gemini 或其他 Agent 框架（无需 Hermes）使用手机控制功能，请参阅独立的 [phone-mcp-server](https://github.com/Ctrl-Creeper/phone-mcp-server) 仓库。它提供 MCP 和 HTTP 服务器，使用相同的后端和安全模型。
 
+另一个直接下游是 [Neko phone_workflows 插件](https://github.com/Ctrl-Creeper/n.e.k.o_plugin_phone_workflows)。维护者和 coding agent 请先阅读 [DOWNSTREAMS.md](DOWNSTREAMS.md)：其中记录了两个下游的同步方式、统一的 helper APK 标识，以及必须单独适配的宿主功能。
+
 ## 安全
 
 完整威胁模型和缓解措施见 [SECURITY.md](SECURITY.md)。

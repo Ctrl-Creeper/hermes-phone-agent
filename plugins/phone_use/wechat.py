@@ -837,7 +837,8 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
     )
 
 
-def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
+def _reply_once(backend: PhoneBackend, chat: str, text: str,
+                on_delivery: Optional[Callable[[str], None]] = None) -> ActionResult:
     opened = open_chat(backend, chat)
     if not opened.ok or opened.capture is None:
         return ActionResult(
@@ -871,6 +872,8 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
             capture=typed.capture,
         )
 
+    if on_delivery is not None:
+        on_delivery("attempted")  # Commit before issuing the irreversible tap.
     sent = _run_and_capture(backend, "tap", lambda: backend.tap(element=send.index))
     if not sent.ok or sent.capture is None:
         return ActionResult(
@@ -924,6 +927,8 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
         lambda value: _contains_reply(value, text),
     )
     if _contains_reply(sent.capture, text):
+        if on_delivery is not None:
+            on_delivery("confirmed")
         return ActionResult(
             ok=True, action="wechat_reply",
             message=f"sent reply to WeChat chat {chat!r}", capture=sent.capture,
@@ -941,19 +946,32 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
     )
 
 
-def reply(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
+def reply(backend: PhoneBackend, chat: str, text: str,
+          on_delivery: Optional[Callable[[str], None]] = None) -> ActionResult:
     """Open a WeChat chat, recover once if needed, and always return Home."""
     result: ActionResult = ActionResult(
         ok=False, action="wechat_reply", message="WeChat reply did not run"
     )
+    attempted = False
+
+    def record_delivery(state: str) -> None:
+        nonlocal attempted
+        # If persisting fails, stop the flow before the tap; do not retry it.
+        attempted = True
+        if on_delivery is not None:
+            on_delivery(state)
+
     try:
         for attempt in range(2):
             try:
-                result = _reply_once(backend, chat, text)
+                result = (_reply_once(backend, chat, text, record_delivery)
+                          if on_delivery is not None else _reply_once(backend, chat, text))
             except Exception as exc:
                 logger.exception("WeChat reply attempt %d failed", attempt + 1)
                 result = ActionResult(
-                    ok=False, action="wechat_reply", message=str(exc)
+                    ok=False, action="wechat_reply", message=str(exc),
+                    meta=({"delivery_attempted": True, "delivery_status": "uncertain"}
+                          if attempted else {}),
                 )
             if result.ok:
                 return result

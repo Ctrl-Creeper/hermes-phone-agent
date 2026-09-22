@@ -137,6 +137,10 @@ Key points:
 
 ## Architecture
 
+Automatic WeChat tasks now retain device ownership through turn cleanup and
+persist reply receipts across restarts. See [automatic task reliability](AUTOMATION.md)
+for replay behavior, scope, and offline verification.
+
 ```
 ┌─────────────────────────────────────────────────┐
 │  Host (PC / Mac)                                │

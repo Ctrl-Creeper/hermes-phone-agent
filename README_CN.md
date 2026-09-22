@@ -1,5 +1,8 @@
 # hermes-phone-agent
 
+自动微信任务会持有设备直到本轮清理完成，并将发送记录持久化，供重启后的重试去重。
+行为边界及离线验证方法见 [自动任务可靠性说明](AUTOMATION.md)。
+
 [English](README.md) | 中文
 
 两个 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 插件 + 一个 Android 辅助 APK，让 Hermes 控制并响应虚拟 Android 手机。

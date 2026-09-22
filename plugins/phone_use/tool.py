@@ -26,6 +26,7 @@ from .policy import bind_event_policy, get_event_policy, get_policy
 from .wechat import open_chat as open_wechat_chat
 from .wechat import reply as reply_to_wechat
 from .wechat import accept_friend_request as accept_wechat_friend_request
+from .wechat import search_history
 from .wechat_context import collect_context as collect_wechat_context
 
 logger = logging.getLogger(__name__)
@@ -49,12 +50,14 @@ _SAFE_ACTIONS = frozenset({
 # foreground app — agent-supplied 'package' is ignored to prevent bypass.
 _PACKAGE_AWARE_ACTIONS = frozenset({"launch_app", "stop_app"})
 _FIXED_PACKAGE_ACTIONS = {
+    "wechat_search_history": "com.tencent.mm",
     "wechat_open_chat": "com.tencent.mm",
     "wechat_reply": "com.tencent.mm",
     "wechat_collect_context": "com.tencent.mm",
 }
 
 _APPROVAL_REQUIRED = frozenset({
+    "wechat_search_history",
     "tap", "double_tap", "long_press", "swipe",
     "type", "clear_text", "set_text", "keyevent",
     "launch_app", "stop_app",
@@ -604,6 +607,8 @@ def _request_approval(
 
 
 def _summarize_action(action: str, args: Dict[str, Any]) -> str:
+    if action == 'wechat_search_history':
+        return f"search WeChat history in {args.get('chat')!r} for {args.get('query')!r}"
     if action in ("tap", "double_tap", "long_press"):
         if args.get("element") is not None:
             return f"{action} element #{args['element']}"
@@ -643,6 +648,9 @@ def _summarize_action(action: str, args: Dict[str, Any]) -> str:
 
 
 def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
+    if action == 'wechat_search_history':
+        return _text_response(search_history(backend, args.get('chat', ''), args.get('query', ''),
+                                             max_pages=args.get('max_pages', 3)))
     if action == "capture":
         mode = args.get("mode", "som")
         if mode not in ("som", "screenshot", "hierarchy"):

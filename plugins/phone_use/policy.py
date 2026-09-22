@@ -34,6 +34,7 @@ BEHAVIOR_IGNORE = "ignore"
 _VALID_BEHAVIORS = frozenset({BEHAVIOR_AUTO, BEHAVIOR_REPORT, BEHAVIOR_IGNORE})
 
 ALL_PHONE_ACTIONS = frozenset({
+    "wechat_search_history",
     "tap", "double_tap", "long_press", "swipe",
     "type", "clear_text", "set_text", "keyevent",
     "launch_app", "stop_app", "install_apk", "shell",

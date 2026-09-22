@@ -95,6 +95,8 @@ you explicitly want verbatim notification title/body delivery.
 
 ## Deterministic WeChat Workflows
 
+Experimental [history search](HISTORY_SEARCH.md) finds bounded keyword snippets inside a verified chat using WeChat's own search page.
+
 `phone_use` includes composite actions for opening a conversation, collecting
 recent context, and replying. Conversation titles are found through WeChat
 search and verified after navigation, so workflows do not depend on a fixed

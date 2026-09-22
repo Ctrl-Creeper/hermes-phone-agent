@@ -176,3 +176,16 @@ def test_next_request_action_is_not_used_for_target():
     backend = Screens(screens, {})
     assert not wechat.accept_friend_request(backend, 'Example Applicant').ok
     assert backend.taps == []
+
+
+def test_contacts_entry_near_top_is_not_the_new_friends_page_title():
+    screens = recommended_screens()
+    screens['start'] = page(
+        element(1, 'Contacts', (445, 106, 638, 155)),
+        element(2, 'New Friends', (191, 274, 454, 323)),
+        element(3, 'Contacts', (337, 2284, 471, 2317)),
+    )
+    backend = Screens(screens, {('start', 3): 'start', ('start', 2): 'requests',
+                               ('requests', 3): 'added'})
+    result = wechat.accept_friend_request(backend, 'Example Applicant')
+    assert result.ok, result.message

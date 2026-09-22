@@ -363,7 +363,8 @@ def _friend_request_row(capture: CaptureResult, requester: str) -> Optional[UIEl
 
 def _friend_page(capture: CaptureResult, labels: frozenset[str]) -> bool:
     return capture.current_package == WECHAT_PACKAGE and any(
-        _label(e).casefold() in labels and e.bounds[1] < capture.height * 0.12
+        _label(e).casefold() in labels and e.bounds[3] < capture.height * 0.1
+        and capture.width * 0.2 <= e.center()[0] <= capture.width * 0.8
         for e in capture.elements
     )
 

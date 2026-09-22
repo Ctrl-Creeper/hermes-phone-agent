@@ -124,6 +124,9 @@ position, not necessarily the original scroll position. It does not send, type,
 scan a QR in WeChat, or navigate Home. It searches bounded history candidates;
 it does not guarantee finding an arbitrary described image or downloading its
 original full-resolution file.
+These guarantees concern the collection call. The phone-events adapter retains
+its separate end-of-turn Home cleanup policy; that gateway lifecycle is not an
+exclusive device-ownership mechanism for concurrent human/other-host use.
 
 `phone_use` includes composite actions for opening a conversation, collecting
 recent context, and replying. Conversation titles are found through WeChat

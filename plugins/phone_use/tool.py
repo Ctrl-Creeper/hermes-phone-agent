@@ -22,7 +22,7 @@ from .backend import (
     PhoneBackend,
     UIElement,
 )
-from .policy import bind_event_policy, get_event_policy, get_policy
+from .policy import bind_event_policy as bind_event_policy, get_event_policy, get_policy
 from .wechat import open_chat as open_wechat_chat
 from .wechat import reply as reply_to_wechat
 from .wechat import accept_friend_request as accept_wechat_friend_request
@@ -364,6 +364,17 @@ def _finish_failed_workflow(
     result: Any, task_id: str, session_id: str, had_scope: bool,
 ) -> Any:
     if had_scope and _result_failed(result):
+        try:
+            payload = json.loads(result) if isinstance(result, str) else result
+        except (TypeError, ValueError):
+            payload = {}
+        if (isinstance(payload, dict)
+                and payload.get("action") == "wechat_collect_context"
+                and payload.get("chat_restored") is False):
+            # The user may have switched apps during recognition. Invalidate
+            # inherited approval without sending a cleanup HOME to their screen.
+            _clear_workflow(task_id, session_id)
+            return result
         _finish_workflow(task_id, session_id)
     return result
 

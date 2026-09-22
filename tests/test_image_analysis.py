@@ -246,6 +246,28 @@ def test_app_switch_during_local_recognition_stops_before_history_swipe(vision_f
     assert phone.gestures == ['tap', 'BACK']
 
 
+def test_failed_image_workflow_does_not_send_home_to_another_app(monkeypatch, tmp_path):
+    from plugins.phone_use import tool
+    config = tmp_path / 'phone-policy.yaml'
+    config.write_text('default_behavior: report\n', encoding='utf-8')
+    monkeypatch.setenv('PHONE_POLICY_PATH', str(config))
+    phone = ImageWorkflowPhone(fault='external')
+    phone.page = 1
+    monkeypatch.setattr(tool, '_backend', phone)
+    monkeypatch.setattr(tool, '_approval_callback', lambda *args: 'approve_once')
+    context = {'task_id': 'interrupted-image-workflow', 'session_id': 'image-session'}
+    started = json.loads(tool.handle_phone_use({
+        'action': 'begin_workflow', 'goal': 'Read image',
+        'allowed_actions': ['wechat_collect_context'],
+    }, **context))
+    assert started['ok']
+    result = json.loads(tool.handle_phone_use({
+        'action': 'wechat_collect_context', 'chat': 'Example', 'max_pages': 1, 'max_images': 1,
+    }, **context))
+    assert not result['ok'] and result['chat_restored'] is False
+    assert phone.gestures == ['tap']
+
+
 @pytest.fixture(scope='module')
 def vision_fixture(tmp_path_factory):
     if sys.platform != 'darwin':

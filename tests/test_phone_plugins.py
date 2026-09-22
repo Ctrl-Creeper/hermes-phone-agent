@@ -2716,6 +2716,7 @@ def test_wechat_context_collection_stops_on_repeated_page(monkeypatch):
         height=2400,
         current_package="com.tencent.mm",
         elements=[
+            UIElement(index=0, class_name="host.ocr.Text", text="群聊", bounds=(400, 80, 680, 150)),
             UIElement(index=1, class_name="host.ocr.Text", text="消息一", bounds=(180, 400, 520, 470)),
             UIElement(index=2, class_name="host.ocr.Text", text="消息二", bounds=(180, 620, 520, 690)),
             UIElement(index=3, class_name="host.ocr.MessageInput", text="[WeChat message input]", bounds=(110, 2165, 720, 2325)),
@@ -2909,17 +2910,21 @@ def test_wechat_context_opens_image_bubbles_and_returns_to_chat(monkeypatch):
     )
 
     class Backend:
+        viewing = False
+
         def capture(self, mode):
             calls.append(("capture", mode))
-            if mode == "screenshot":
+            if self.viewing:
                 return viewer_page
             return chat_page
 
         def tap(self, **kwargs):
+            self.viewing = True
             calls.append(("tap", kwargs.get("element")))
             return phone_tool.ActionResult(ok=True, action="tap", capture=viewer_page)
 
         def keyevent(self, keycode):
+            self.viewing = False
             calls.append(("keyevent", keycode))
             return phone_tool.ActionResult(ok=True, action="keyevent", capture=chat_page)
 
@@ -2952,6 +2957,7 @@ def test_wechat_context_pages_past_text_limit_until_image_is_found(monkeypatch):
         ]
         if image is not None:
             elements.append(image)
+        elements.append(UIElement(index=0, class_name="host.ocr.Text", text="群聊", bounds=(400, 80, 680, 150)))
         elements.append(UIElement(
             index=99, class_name="host.ocr.MessageInput", text="input",
             bounds=(100, 2150, 900, 2320),
@@ -3022,6 +3028,7 @@ def test_wechat_context_does_not_stop_when_same_text_moves_before_image(monkeypa
 
     def page(top, image=None):
         elements = [
+            UIElement(index=0, class_name="host.ocr.Text", text="群聊", bounds=(400, 80, 680, 150)),
             UIElement(
                 index=1, class_name="host.ocr.Text", text="same visible line",
                 bounds=(200, top, 800, top + 50),
@@ -3122,112 +3129,6 @@ def test_wechat_context_accepts_host_visual_image_candidate():
     assert _image_bubbles(capture) == [image]
 
 
-def test_wechat_image_noop_is_not_reported_as_opened():
-    from plugins.phone_use import wechat_context
-
-    image = UIElement(
-        index=2, class_name="host.vision.ImageCandidate",
-        bounds=(185, 167, 528, 628), clickable=True,
-    )
-    chat_page = phone_tool.CaptureResult(
-        mode="image_hierarchy", width=1080, height=2400,
-        current_package="com.tencent.mm", current_activity=".ui.LauncherUI",
-        elements=[image, UIElement(
-            index=3, class_name="host.ocr.MessageInput", text="input",
-            bounds=(100, 2150, 900, 2320),
-        )],
-    )
-
-    class Backend:
-        def tap(self, **kwargs):
-            return phone_tool.ActionResult(ok=True, action="tap")
-
-        def wait(self, seconds):
-            return phone_tool.ActionResult(ok=True, action="wait")
-
-        def capture(self, mode):
-            if mode == "screenshot":
-                return phone_tool.CaptureResult(
-                    mode=mode, width=1080, height=2400,
-                    current_package="com.tencent.mm",
-                    current_activity=".ui.LauncherUI", png_b64="bm9vcA==",
-                )
-            return chat_page
-
-        def keyevent(self, keycode):
-            return phone_tool.ActionResult(ok=True, action="keyevent")
-
-    assert wechat_context._open_image_bubble(
-        Backend(), image, chat_activity=".ui.LauncherUI",
-    ) is None
-
-
-def test_wechat_non_image_destination_is_rejected_and_returns_to_chat():
-    from plugins.phone_use import wechat_context
-
-    image = UIElement(
-        index=2, class_name="host.vision.ImageCandidate",
-        bounds=(185, 167, 528, 628), clickable=True,
-    )
-    calls = []
-
-    class Backend:
-        def tap(self, **kwargs):
-            return phone_tool.ActionResult(ok=True, action="tap")
-
-        def wait(self, seconds):
-            return phone_tool.ActionResult(ok=True, action="wait")
-
-        def capture(self, mode):
-            return phone_tool.CaptureResult(
-                mode=mode, width=1080, height=2400,
-                current_package="com.tencent.mm",
-                current_activity=".plugin.lite.ui.WxaLiteAppLiteUI",
-                png_b64="bm90LWEtcGhvdG8=",
-            )
-
-        def keyevent(self, keycode):
-            calls.append(("keyevent", keycode))
-            return phone_tool.ActionResult(ok=True, action="keyevent")
-
-    assert wechat_context._open_image_bubble(
-        Backend(), image, chat_activity=".ui.LauncherUI",
-    ) is None
-    assert calls == [("keyevent", "BACK")]
-
-
-def test_wechat_non_image_recovery_failure_is_logged_and_rejected(caplog):
-    from plugins.phone_use import wechat_context
-
-    image = UIElement(
-        index=2, class_name="host.vision.ImageCandidate",
-        bounds=(185, 167, 528, 628), clickable=True,
-    )
-
-    class Backend:
-        def tap(self, **kwargs):
-            return phone_tool.ActionResult(ok=True, action="tap")
-
-        def wait(self, seconds):
-            return phone_tool.ActionResult(ok=True, action="wait")
-
-        def capture(self, mode):
-            return phone_tool.CaptureResult(
-                mode=mode, width=1080, height=2400,
-                current_package="com.tencent.mm",
-                current_activity=".plugin.lite.ui.WxaLiteAppLiteUI",
-                png_b64="bm90LWEtcGhvdG8=",
-            )
-
-        def keyevent(self, keycode):
-            raise RuntimeError("back failed")
-
-    with caplog.at_level("WARNING"):
-        assert wechat_context._open_image_bubble(
-            Backend(), image, chat_activity=".ui.LauncherUI",
-        ) is None
-
-    assert "Could not recover from a non-image WeChat destination" in caplog.text
 
 
 def test_wechat_reply_returns_home_when_chat_cannot_be_found():

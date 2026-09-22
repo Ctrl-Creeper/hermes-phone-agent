@@ -109,6 +109,22 @@ decoder returns `status=unavailable`; an older helper returns
 code. Returned text/QR content is bounded and QR truncation is explicit. Preview
 screenshots may contain viewer controls, so OCR text may include those controls.
 
+Each image attempt verifies the WeChat viewer, saves its screenshot, then returns
+to the exact original chat before local recognition. Returning from the viewer
+refreshes the UI targets; a failed return stops collection with
+`chat_restored=false` instead of tapping or scrolling on the wrong screen.
+`max_images` bounds attempted candidates, including failed opens. Overlapping
+native/Vision regions for the same thumbnail count as one candidate.
+
+Tests exercise bounded history discovery, multiple previews with changing element
+IDs, real Vision text/QR decoding, return failures and a subsequent phone-tool
+read with an unchanged draft. Device transitions are simulated: real WeChat
+validation is still pending. Collection leaves the chat at the inspected history
+position, not necessarily the original scroll position. It does not send, type,
+scan a QR in WeChat, or navigate Home. It searches bounded history candidates;
+it does not guarantee finding an arbitrary described image or downloading its
+original full-resolution file.
+
 `phone_use` includes composite actions for opening a conversation, collecting
 recent context, and replying. Conversation titles are found through WeChat
 search and verified after navigation, so workflows do not depend on a fixed

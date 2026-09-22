@@ -168,7 +168,7 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
             },
             "max_images": {
                 "type": "integer", "minimum": 1, "maximum": 5,
-                "description": "Maximum image bubbles to open (default 3).",
+                "description": "Maximum image candidates to attempt, including failed opens (default 3).",
             },
             "keycode": {
                 "type": "string",

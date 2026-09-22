@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from .backend import ActionResult, CaptureResult, PhoneBackend
-from .wechat import open_chat
+from .wechat import open_chat, _find_chat_header, _is_search_page, _normalize_chat_title
 from .host_ocr import analyze_image
 
 logger = logging.getLogger(__name__)
@@ -53,57 +53,95 @@ def _image_bubbles(capture: CaptureResult) -> list:
         )
         if (
             element.clickable
+            and element.enabled
             and semantic_image
             and y1 >= top
             and y2 <= bottom
             and area >= 4_000
         ):
+            # Native hierarchy and host Vision can describe the same bubble.
+            # Keep one target when the regions almost completely overlap.
+            duplicate = False
+            for existing in candidates:
+                x1, ey1, x2, ey2 = existing.bounds
+                intersection = max(0, min(right, x2) - max(left, x1)) * max(0, min(y2, ey2) - max(y1, ey1))
+                union = area + (x2 - x1) * (ey2 - ey1) - intersection
+                if union > 0 and intersection / union >= 0.8:
+                    duplicate = True
+                    break
+            if duplicate:
+                continue
             candidates.append(element)
     return candidates
 
 
+class ImageRecoveryError(RuntimeError):
+    """The caller must stop, because the original chat is not verified."""
+
+
+def _verified_chat(capture: CaptureResult, chat: str) -> bool:
+    header = _find_chat_header(capture, chat)
+    return (
+        capture.current_package == "com.tencent.mm"
+        and not any(marker in capture.current_activity.casefold()
+                    for marker in ("imagegallery", "imagepreview"))
+        and not _is_search_page(capture)
+        and header is not None
+        and _normalize_chat_title(header.text or header.content_desc or "") == _normalize_chat_title(chat)
+        and any(e.class_name == "host.ocr.MessageInput" or (
+            "edittext" in e.class_name.casefold() and e.bounds[1] > capture.height * 0.5
+        ) for e in capture.elements)
+    )
+
+
 def _open_image_bubble(
-    backend: PhoneBackend, element: object, *, chat_activity: str = "",
-) -> Optional[str]:
-    """Open one image bubble, capture its preview, and return to the chat."""
-    tapped = backend.tap(element=element.index)
-    if not tapped.ok:
-        return None
-    backend.wait(0.25)
-    preview = backend.capture(mode="screenshot")
-    # ADB taps succeed even on blank space, and textured message cards can be
-    # mistaken for photos. Only WeChat's image/gallery viewers count as an
-    # opened image; other destinations are recovered below and skipped.
-    preview_activity = (preview.current_activity or "").casefold()
-    left_chat = bool(
-        preview.current_package == "com.tencent.mm"
-        and preview_activity
-        and preview.current_activity != chat_activity
-    )
-    opened_preview = left_chat and any(
-        marker in preview_activity
-        for marker in ("imagegallery", "imagepreview")
-    )
-    image = (
-        preview.png_b64 or getattr(tapped.capture, "png_b64", None)
-    ) if opened_preview else None
-    if not opened_preview:
-        if left_chat:
-            try:
-                backend.keyevent("BACK")
-                backend.wait(0.15)
-            except Exception:
-                logger.warning(
-                    "Could not recover from a non-image WeChat destination",
-                    exc_info=True,
-                )
-        return None
+    backend: PhoneBackend, element: object, *, chat: str, chat_activity: str = "",
+) -> tuple[Optional[str], CaptureResult]:
+    """Inspect one candidate and verify recovery, even after transport errors."""
+    image = None
     try:
-        backend.keyevent("BACK")
-        backend.wait(0.15)
+        tapped = backend.tap(element=element.index)
+        if tapped.ok:
+            # Bounded settle polling; a successful input command is not evidence
+            # that a viewer opened. Never reuse the tap's possibly stale image.
+            for _ in range(3):
+                backend.wait(0.25)
+                preview = backend.capture(mode="screenshot")
+                activity = (preview.current_activity or "").casefold()
+                if (preview.current_package == "com.tencent.mm"
+                        and preview.current_activity != chat_activity
+                        and any(marker in activity for marker in ("imagegallery", "imagepreview"))):
+                    if preview.png_b64:
+                        image = preview.png_b64
+                        break
+                elif (preview.current_package != "com.tencent.mm"
+                      or (preview.current_activity and preview.current_activity != chat_activity)):
+                    break
     except Exception:
-        logger.warning("Could not return from WeChat image preview", exc_info=True)
-    return image
+        logger.warning("WeChat image inspection failed; checking recovery", exc_info=True)
+
+    try:
+        restored = backend.capture(mode="image_hierarchy")
+        if not _verified_chat(restored, chat):
+            # Do not send BACK to another app or another conversation. Only
+            # reverse the observed in-WeChat transition caused by this tap.
+            if (restored.current_package != "com.tencent.mm"
+                    or not restored.current_activity
+                    or restored.current_activity == chat_activity):
+                raise ImageRecoveryError("Image inspection left the expected chat")
+            backend.keyevent("BACK")
+            for _ in range(3):
+                backend.wait(0.15)
+                restored = backend.capture(mode="image_hierarchy")
+                if _verified_chat(restored, chat):
+                    break
+            else:
+                raise ImageRecoveryError("BACK did not restore the original chat")
+        return image, restored
+    except ImageRecoveryError:
+        raise
+    except Exception as exc:
+        raise ImageRecoveryError("Could not verify return from image preview") from exc
 
 
 def parse_collection_scope(
@@ -229,10 +267,12 @@ def collect_context(
         )
 
     current = opened.capture
+    resolved_chat = opened.meta.get("resolved_chat", chat)
     combined: list[str] = []
     screenshots: list[str] = []
     image_analysis: list[dict] = []
     opened_images = 0
+    image_attempts = 0
     max_images = max(0, min(int(max_images), 5))
     seen_image_bubbles: set[tuple[str, tuple[int, int, int, int]]] = set()
     signatures: set[tuple[object, ...]] = set()
@@ -246,35 +286,62 @@ def collect_context(
             # Image inspection needs the real accessibility nodes (ImageView
             # bounds/click targets), while ordinary context collection can use
             # the faster OCR-backed SOM capture.
-            visual = backend.capture(
-                mode="image_hierarchy" if open_images else "som"
-            )
+            try:
+                visual = backend.capture(
+                    mode="image_hierarchy" if open_images else "som"
+                )
+            except Exception as exc:
+                return ActionResult(ok=False, action="wechat_collect_context", message=str(exc),
+                                    meta={"stop_reason": "capture_failed", "chat_restored": False})
+            if not _verified_chat(visual, resolved_chat):
+                return ActionResult(ok=False, action="wechat_collect_context",
+                                    message="Expected WeChat chat is no longer visible",
+                                    meta={"stop_reason": "chat_changed", "chat_restored": False})
             if visual.png_b64 and not open_images and len(screenshots) < 5:
                 screenshots.append(visual.png_b64)
                 image_analysis.append({"image_index": len(screenshots), "source": "chat_screenshot",
                                        **analyze_image(visual.png_b64)})
             current = visual
 
-            if open_images and opened_images < max_images:
-                for image_element in _image_bubbles(current):
+            if open_images and image_attempts < max_images:
+                while image_attempts < max_images:
+                    # Recognition can take seconds. Re-observe before another
+                    # tap instead of using pre-recognition element IDs.
+                    try:
+                        current = backend.capture(mode="image_hierarchy")
+                    except Exception as exc:
+                        return ActionResult(ok=False, action="wechat_collect_context", message=str(exc),
+                                            meta={"stop_reason": "capture_failed", "chat_restored": False})
+                    if not _verified_chat(current, resolved_chat):
+                        return ActionResult(ok=False, action="wechat_collect_context",
+                                            message="Chat changed before image inspection",
+                                            meta={"stop_reason": "chat_changed", "chat_restored": False})
+                    candidates = [e for e in _image_bubbles(current) if (
+                        (e.text or e.content_desc or "").strip(), e.bounds,
+                    ) not in seen_image_bubbles]
+                    if not candidates:
+                        break
+                    image_element = candidates[0]
                     signature = (
                         (image_element.text or image_element.content_desc or "").strip(),
                         image_element.bounds,
                     )
-                    if signature in seen_image_bubbles:
-                        continue
                     seen_image_bubbles.add(signature)
-                    image = _open_image_bubble(
-                        backend, image_element,
-                        chat_activity=current.current_activity,
-                    )
+                    image_attempts += 1
+                    try:
+                        image, current = _open_image_bubble(
+                            backend, image_element, chat=resolved_chat,
+                            chat_activity=current.current_activity,
+                        )
+                    except ImageRecoveryError as exc:
+                        return ActionResult(ok=False, action="wechat_collect_context", message=str(exc),
+                                            meta={"stop_reason": "image_recovery_failed",
+                                                  "chat_restored": False})
                     if image:
                         screenshots.append(image)
                         image_analysis.append({"image_index": len(screenshots), "source": "image_preview",
                                                **analyze_image(image)})
                         opened_images += 1
-                    if opened_images >= max_images:
-                        break
 
         page_lines = _visible_lines(current)
         # The same messages remain visible across a successful partial swipe.
@@ -296,7 +363,7 @@ def collect_context(
         )
         signature = (tuple(page_lines), position_markers, image_markers)
         pages += 1
-        seeking_first_image = open_images and max_images > 0 and opened_images == 0
+        seeking_first_image = include_images and open_images and image_attempts < max_images and opened_images == 0
         if signature in signatures:
             # WeChat may need longer than the normal post-swipe delay to load
             # older records. During image discovery tolerate one stale frame;
@@ -331,6 +398,16 @@ def collect_context(
         # screen width (360 px on this portrait emulator), which advances chat
         # history too slowly. Keep more than half a viewport of overlap while
         # covering enough history for bounded image discovery.
+        if include_images:
+            try:
+                current = backend.capture(mode="hierarchy")
+            except Exception as exc:
+                return ActionResult(ok=False, action="wechat_collect_context", message=str(exc),
+                                    meta={"stop_reason": "capture_failed", "chat_restored": False})
+            if not _verified_chat(current, resolved_chat):
+                return ActionResult(ok=False, action="wechat_collect_context",
+                                    message="Chat changed before history swipe",
+                                    meta={"stop_reason": "chat_changed", "chat_restored": False})
         swiped = backend.swipe(
             direction="down",
             from_xy=(current.width // 2, int(current.height * 0.30)),
@@ -347,6 +424,17 @@ def collect_context(
         backend.wait(0.2)
         current = backend.capture(mode="hierarchy")
 
+    if include_images:
+        try:
+            current = backend.capture(mode="image_hierarchy" if open_images else "som")
+        except Exception as exc:
+            return ActionResult(ok=False, action="wechat_collect_context", message=str(exc),
+                                meta={"stop_reason": "capture_failed", "chat_restored": False})
+        if not _verified_chat(current, resolved_chat):
+            return ActionResult(ok=False, action="wechat_collect_context",
+                                message="Chat changed during recognition",
+                                meta={"stop_reason": "chat_changed", "chat_restored": False})
+
     combined = combined[-effective.max_messages:]
     coverage = "complete" if stop_reason in {"message_limit", "time_limit", "chat_top"} else "partial"
     meta = {
@@ -362,6 +450,8 @@ def collect_context(
         "screenshots": screenshots,
         "image_count": opened_images if open_images else len(screenshots),
         "image_analysis": image_analysis,
+        "image_attempts": image_attempts,
+        "chat_restored": True if include_images else None,
     }
     return ActionResult(
         ok=True,

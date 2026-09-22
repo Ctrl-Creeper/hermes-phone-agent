@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Callable, Optional
 
@@ -35,6 +36,26 @@ _ACCEPT_LABELS = frozenset({"accept", "接受", "添加"})
 _ADDED_LABELS = frozenset({"added", "accepted", "已添加", "已通过"})
 _SYMBOL_CHAT_HINT_TTL_SECONDS = 120.0
 _symbol_chat_hint: Optional[tuple[str, str, float]] = None
+_EMOJI_PLACEHOLDER = re.compile(r"\[(?:emoji|sticker|表情)\]", re.IGNORECASE)
+
+
+def _has_emoji(value: str) -> bool:
+    return any(unicodedata.category(c) == "So" for c in value)
+
+
+def _matches_placeholder_title(observed: str, requested: str) -> bool:
+    """An unknown emoji may match symbols, never missing text or another name."""
+    parts = _EMOJI_PLACEHOLDER.split(_normalize_chat_title(requested))
+    if len(parts) < 2 or not any(any(c.isalnum() for c in p) for p in parts):
+        return False
+    match = re.fullmatch("(.+?)".join(re.escape(p) for p in parts),
+                         _normalize_chat_title(observed))
+    if match is None:
+        return False
+    return all(_has_emoji(group) and all(
+        unicodedata.category(c) in {"So", "Sk", "Mn", "Me"}
+        or c == "\u200d" for c in group
+    ) for group in match.groups())
 
 
 def _label(element: UIElement) -> str:
@@ -42,17 +63,20 @@ def _label(element: UIElement) -> str:
 
 
 def _find_text(elements: list[UIElement], text: str) -> Optional[UIElement]:
+    if _EMOJI_PLACEHOLDER.search(text):
+        matches = [e for e in elements if _matches_placeholder_title(_label(e), text)]
+        return matches[0] if len(matches) == 1 else None
     wanted = _normalize_chat_title(text)
     exact = [
         element for element in elements
         if _normalize_chat_title(_label(element)) == wanted
     ]
     if exact:
-        return exact[0]
+        return exact[0] if len(exact) == 1 else None
 
     # Short names are too collision-prone for fuzzy matching. For longer chat
     # titles, accept OCR substitutions only when one candidate is clearly best.
-    if len(wanted) < 5:
+    if len(wanted) < 5 or _has_emoji(wanted):
         return None
     matches = [
         (
@@ -147,6 +171,8 @@ def _matches_recent_symbol_chat(chat: str, capture: CaptureResult) -> bool:
 
 def _find_chat_header(capture: CaptureResult, chat: str) -> Optional[UIElement]:
     """Find the conversation title, as opposed to a list row or message body."""
+    if _EMOJI_PLACEHOLDER.search(chat):
+        return None  # Resolve through search, never trust the current chat alone.
     wanted = _normalize_chat_title(chat)
     if not wanted:
         return None
@@ -160,6 +186,7 @@ def _find_chat_header(capture: CaptureResult, chat: str) -> Optional[UIElement]:
         observed = _normalize_chat_title(_label(element))
         if observed == wanted or (
             len(wanted) >= 5
+            and not _has_emoji(wanted)
             and SequenceMatcher(None, wanted, observed).ratio()
             >= _MIN_TITLE_SIMILARITY
         ):
@@ -371,6 +398,18 @@ def _search_for_chat(
     capture: CaptureResult,
     chat: str,
 ) -> ActionResult:
+    placeholder = bool(_EMOJI_PLACEHOLDER.search(chat))
+    query = chat
+    if placeholder:
+        # Keep a contiguous text fragment; joining both sides of an emoji can
+        # produce a query which is not present in WeChat's name index.
+        anchors = [part.strip() for part in _EMOJI_PLACEHOLDER.split(chat)
+                   if any(c.isalnum() for c in part)]
+        if not anchors:
+            return ActionResult(ok=False, action="wechat_open_chat",
+                                message="Emoji placeholder has no searchable name text; provide the original name or a unique WeChat remark")
+        query = max(anchors, key=len)
+    resolved_chat = chat
     search_control = _find_search_control(capture)
     if search_control is None:
         return ActionResult(
@@ -399,7 +438,7 @@ def _search_for_chat(
         )
 
     typed = _run_and_capture(
-        backend, "set_text", lambda: backend.set_text(chat),
+        backend, "set_text", lambda: backend.set_text(query),
     )
     if not typed.ok or typed.capture is None:
         return ActionResult(
@@ -422,7 +461,7 @@ def _search_for_chat(
         return None
 
     def desired_chat_is_open(value: CaptureResult) -> bool:
-        if _chat_is_open(value, chat):
+        if _chat_is_open(value, resolved_chat):
             return True
         # Exact search is still trustworthy for a pure-symbol title even when
         # Vision renders the glyph as a letter on both the result and header.
@@ -442,6 +481,9 @@ def _search_for_chat(
             message=f"WeChat search found no unambiguous chat {chat!r}",
             capture=results,
         )
+
+    if placeholder:
+        resolved_chat = _label(target)
 
     selected = _run_and_capture(
         backend, "tap", lambda: backend.tap(element=target.index),
@@ -483,6 +525,7 @@ def _search_for_chat(
         ok=True, action="wechat_open_chat",
         message=f"opened WeChat chat {chat!r} via search",
         capture=selected_capture,
+        meta={"resolved_chat": resolved_chat} if placeholder else {},
     )
 
 
@@ -707,6 +750,16 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
             message="WeChat did not become the foreground app after launch",
             capture=capture,
         )
+
+    if _EMOJI_PLACEHOLDER.search(chat):
+        # Search all returned candidates even when one matching list row or
+        # current conversation is visible: the lost emoji is not an identity.
+        if not _is_conversation_list(capture):
+            recovered = _return_to_conversation_list(backend, capture)
+            if not recovered.ok or recovered.capture is None:
+                return recovered
+            capture = recovered.capture
+        return _search_for_chat(backend, capture, chat)
 
     input_element = _find_input(capture.elements)
     if input_element is not None and _find_chat_header(capture, chat) is not None:

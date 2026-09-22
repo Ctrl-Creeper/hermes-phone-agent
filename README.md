@@ -100,6 +100,14 @@ recent context, and replying. Conversation titles are found through WeChat
 search and verified after navigation, so workflows do not depend on a fixed
 row position. Host-side OCR supports WeChat screens whose accessibility tree
 is blank or incomplete.
+
+When a notification replaces a nickname emoji with `[Sticker]`, `[emoji]` or
+`[表情]`, search uses the longest remaining text fragment. It opens only a
+unique visible result whose text and symbol positions match, then verifies the
+selected full title. The placeholder cannot recover the original emoji:
+ambiguous names, unreadable symbols and names consisting only of placeholders
+require the original nickname or a unique WeChat remark. Real Unicode emoji
+are preserved through clipboard input; reply bodies are not rewritten.
 The host OCR fallback currently requires macOS with `swiftc`; `setup.sh`
 builds and installs it automatically. Other platforms continue using Android's
 accessibility hierarchy and screenshots.

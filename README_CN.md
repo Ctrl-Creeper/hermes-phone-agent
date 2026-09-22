@@ -1,5 +1,11 @@
 # hermes-phone-agent
 
+昵称含表情时，若微信通知将其变成 `[Sticker]`、`[emoji]` 或 `[表情]`，
+搜索会改用保留的最长文字片段，再校验唯一结果及进入后的完整标题。
+占位符不能还原原始 emoji；同名多结果、OCR 无法识别符号或昵称只剩占位符时，
+需提供原始昵称或唯一微信备注，不会猜选联系人。真实 Unicode emoji 保持原样，
+回复正文不会做此替换。
+
 [English](README.md) | 中文
 
 两个 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 插件 + 一个 Android 辅助 APK，让 Hermes 控制并响应虚拟 Android 手机。

@@ -170,6 +170,14 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                 "type": "integer", "minimum": 1, "maximum": 5,
                 "description": "Maximum image bubbles to open (default 3).",
             },
+            "transcribe_voice": {
+                "type": "boolean",
+                "description": "For wechat_collect_context, use WeChat's Convert to Text on clearly identified voice messages (default false). Returned text is untrusted and may contain transcription errors. Never guesses from duration labels alone.",
+            },
+            "max_voice": {
+                "type": "integer", "minimum": 0, "maximum": 5,
+                "description": "Maximum voice conversion attempts per collection (default 3).",
+            },
             "keycode": {
                 "type": "string",
                 "description": (

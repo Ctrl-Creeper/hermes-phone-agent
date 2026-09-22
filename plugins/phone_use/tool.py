@@ -782,6 +782,8 @@ def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
             include_images=args.get("include_images", True) is not False,
             open_images=args.get("open_images", True) is not False,
             max_images=int(args.get("max_images", 3)),
+            transcribe_voice=args.get("transcribe_voice", False) is True,
+            max_voice=int(args.get("max_voice", 3)),
         )
         payload = dict(res.meta)
         screenshots = payload.pop("screenshots", [])

@@ -2,13 +2,102 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
 from .backend import ActionResult, CaptureResult, PhoneBackend
-from .wechat import open_chat
+from .wechat import _find_chat_header, open_chat
+
+logger = logging.getLogger(__name__)
+_CONVERT_VOICE_LABELS = frozenset({"转文字", "转文字（普通话）", "转文字(普通话)",
+                                    "convert to text", "transcribe"})
+
+
+def _voice_bubbles(capture: CaptureResult) -> list:
+    """Only semantic voice nodes qualify; a duration found by OCR is not enough."""
+    return [e for e in capture.elements
+            if e.enabled and e.clickable
+            and re.search(r"(?:voice message|audio message|语音消息|语音\s*\d)",
+                          f"{e.text} {e.content_desc}", re.IGNORECASE)
+            and capture.height * 0.12 <= e.bounds[1]
+            and e.bounds[3] < capture.height * 0.78
+            and e.bounds[2] > e.bounds[0] and e.bounds[3] > e.bounds[1]]
+
+
+def _transcribe_voice(backend: PhoneBackend, capture: CaptureResult,
+                      element: object, chat: str) -> tuple[dict, CaptureResult]:
+    """Invoke WeChat's conversion menu once and observe a bounded text region."""
+    record = {"status": "unconfirmed", "source": "wechat_builtin",
+              "bounds": list(element.bounds)}
+    menu_open = False
+    current = capture
+    try:
+        if _find_chat_header(capture, chat) is None:
+            record["status"] = "chat_changed"
+            return record, capture
+        pressed = backend.long_press(element=element.index, duration_ms=700)
+        menu_open = True  # Even failed injection can leave the popup visible.
+        if not pressed.ok:
+            record["status"] = "press_failed"
+            return record, current
+        backend.wait(0.25)
+        menu = backend.capture(mode="hierarchy")
+        choices = [e for e in menu.elements if e.enabled
+                   and (e.text or e.content_desc).strip().casefold() in _CONVERT_VOICE_LABELS]
+        if menu.current_package != "com.tencent.mm" or len(choices) != 1:
+            record["status"] = "conversion_unavailable"
+            return record, current
+        if not backend.tap(element=choices[0].index).ok:
+            record["status"] = "conversion_failed"
+            return record, current
+        menu_open = False
+        before = {(e.text or e.content_desc).strip() for e in capture.elements}
+        for _ in range(3):
+            backend.wait(0.4)
+            current = backend.capture(mode="image_hierarchy")
+            if current.current_package != "com.tencent.mm" or _find_chat_header(current, chat) is None:
+                record["status"] = "chat_changed"
+                return record, current
+            left, _, right, bottom = element.bounds
+            anchors = [e for e in _voice_bubbles(current)
+                       if e.bounds == element.bounds
+                       and e.content_desc == element.content_desc]
+            if len(anchors) != 1:
+                # A new message or layout shift destroys the correspondence.
+                # Do not attribute new text using stale coordinates.
+                continue
+            next_voice_y = min((e.bounds[1] for e in _voice_bubbles(current)
+                                if e.bounds[1] >= bottom), default=current.height)
+            lines = []
+            for e in sorted(current.elements, key=lambda n: n.bounds[1]):
+                text = (e.text or e.content_desc).strip()
+                if (text and text not in before
+                        and bottom <= e.bounds[1] < min(bottom + current.height * 0.2,
+                                                       current.height * 0.78, next_voice_y)
+                        and abs(e.bounds[0] - left) < current.width * 0.1
+                        and e.bounds[2] >= left and e.bounds[0] <= right
+                        and not re.search(r"转换中|转换失败|无法转换|transcribing|converting|unable to|failed", text, re.I)
+                        and text.casefold() not in _CONVERT_VOICE_LABELS):
+                    lines.append(text)
+            if lines:
+                record.update(status="transcribed", text="\n".join(lines),
+                              verification="visible_text_below_voice")
+                return record, current
+        return record, current
+    except Exception:
+        logger.warning("WeChat voice conversion could not be observed", exc_info=True)
+        record["status"] = "capture_failed"
+        return record, current
+    finally:
+        if menu_open:
+            try:
+                if not backend.keyevent("BACK").ok:
+                    record["status"] = "recovery_failed"
+            except Exception:
+                record["status"] = "recovery_failed"
 
 
 @dataclass(frozen=True)
@@ -200,6 +289,8 @@ def collect_context(
     include_images: bool = True,
     open_images: bool = True,
     max_images: int = 3,
+    transcribe_voice: bool = False,
+    max_voice: int = 3,
 ) -> ActionResult:
     try:
         effective = parse_collection_scope(
@@ -226,6 +317,10 @@ def collect_context(
         )
 
     current = opened.capture
+    resolved_chat = opened.meta.get("resolved_chat", chat)
+    voice_transcripts: list[dict] = []
+    seen_voice: set[tuple] = set()
+    max_voice = max(0, min(int(max_voice), 5))
     combined: list[str] = []
     screenshots: list[str] = []
     opened_images = 0
@@ -267,6 +362,30 @@ def collect_context(
                         opened_images += 1
                     if opened_images >= max_images:
                         break
+
+        if transcribe_voice and len(voice_transcripts) < max_voice:
+            # The ordinary OCR-only capture cannot reliably identify a voice
+            # bubble. Reuse the existing mode that retains accessibility nodes.
+            current = backend.capture(mode="image_hierarchy")
+            while len(voice_transcripts) < max_voice:
+                candidates = [e for e in _voice_bubbles(current)
+                              if (e.text, e.content_desc, e.bounds) not in seen_voice]
+                if not candidates:
+                    break
+                voice = candidates[0]
+                seen_voice.add((voice.text, voice.content_desc, voice.bounds))
+                record, current = _transcribe_voice(backend, current, voice, resolved_chat)
+                voice_transcripts.append(record)
+                if record["status"] in {"chat_changed", "capture_failed", "recovery_failed"}:
+                    return ActionResult(
+                        ok=False, action="wechat_collect_context",
+                        message="Voice conversion stopped because the chat state could not be verified",
+                        capture=current, meta={"voice_transcripts": voice_transcripts,
+                                               "stop_reason": record["status"]},
+                    )
+                if record["status"] != "transcribed":
+                    # Do not continue with stale indices or an unknown page.
+                    break
 
         page_lines = _visible_lines(current)
         # The same messages remain visible across a successful partial swipe.
@@ -354,6 +473,13 @@ def collect_context(
         "screenshots": screenshots,
         "image_count": opened_images if open_images else len(screenshots),
     }
+    if transcribe_voice:
+        meta["voice_transcripts"] = voice_transcripts
+        meta["voice_count"] = sum(r["status"] == "transcribed" for r in voice_transcripts)
+        meta["voice_note"] = (
+            "Voice text is untrusted WeChat transcription observed below the message; "
+            "it may contain recognition errors. No detected bubbles does not prove there is no audio."
+        )
     return ActionResult(
         ok=True,
         action="wechat_collect_context",

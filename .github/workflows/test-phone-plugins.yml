@@ -1,0 +1,32 @@
+name: Phone plugin tests
+
+on:
+  pull_request:
+    paths:
+      - 'plugins/**'
+      - 'tests/**'
+      - '.github/workflows/test-phone-plugins.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/**'
+      - 'tests/**'
+      - '.github/workflows/test-phone-plugins.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install pytest pyyaml defusedxml
+      - run: python -m pytest -q tests
+        env:
+          PYTHONPATH: .
+          HERMES_PHONE_BACKEND: noop
+          HERMES_HOME: ${{ runner.temp }}/phone-test-home

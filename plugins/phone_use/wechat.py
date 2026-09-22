@@ -26,7 +26,10 @@ _SEARCH_RESULT_SECTIONS = frozenset({
     "group chats", "群聊",
     "official accounts", "公众号",
     "mini programs", "小程序",
-    "chat history", "聊天记录",
+    "chat history", "chat histories", "聊天记录",
+})
+_CHAT_RESULT_SECTIONS = frozenset({
+    "top hits", "最佳匹配", "最常使用", "contacts", "联系人", "group chats", "群聊",
 })
 _TOP_HIT_LABELS = frozenset({"top hits", "最佳匹配", "最常使用"})
 _CONTACT_LABELS = frozenset({"contacts", "通讯录"})
@@ -448,10 +451,25 @@ def _search_for_chat(
         )
 
     def find_result(value: CaptureResult) -> Optional[UIElement]:
+        sections = sorted((e for e in value.elements
+                           if _label(e).casefold() in _SEARCH_RESULT_SECTIONS),
+                          key=lambda e: e.bounds[1])
+
+        def is_chat_result(element: UIElement) -> bool:
+            if _label(element).casefold() in _SEARCH_RESULT_SECTIONS:
+                return False
+            preceding = [e for e in sections if e.bounds[1] <= element.bounds[1]]
+            # Some hierarchy/OCR frames omit all section labels. Preserve that
+            # path; when sections exist, never treat history snippets as names.
+            return not sections or bool(
+                preceding and _label(preceding[-1]).casefold() in _CHAT_RESULT_SECTIONS
+            )
+
         candidates = [
             element for element in value.elements
             if element.bounds[1] >= max(220, int(value.height * 0.12))
             and element.bounds[3] < value.height - 180
+            and is_chat_result(element)
         ]
         matched = _find_text(candidates, chat)
         if matched is not None:

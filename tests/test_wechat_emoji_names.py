@@ -128,3 +128,22 @@ def test_placeholder_header_alone_cannot_authorize_current_conversation():
 
 def test_literal_bracketed_name_is_not_an_emoji_placeholder():
     assert not wechat._EMOJI_PLACEHOLDER.search('Example [Team]')
+
+
+@pytest.mark.parametrize('section', ['Chat History', 'Chat Histories', '聊天记录',
+                                    'Official Accounts', 'Mini Programs'])
+def test_search_does_not_select_history_or_non_contact_sections(section):
+    class SectionBackend(SearchBackend):
+        def capture(self, mode):
+            result = super().capture(mode)
+            if self.state == 'results':
+                result.elements.insert(0, UIElement(
+                    index=90, class_name='host.ocr.Text', text=section,
+                    bounds=(40, 300, 450, 360),
+                ))
+            return result
+
+    backend = SectionBackend(['阿明😀'], '阿明😀')
+    result = search(backend, '阿明[Sticker]')
+    assert not result.ok
+    assert backend.taps == [('initial', 9)]

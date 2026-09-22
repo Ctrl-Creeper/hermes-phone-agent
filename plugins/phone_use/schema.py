@@ -137,6 +137,22 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                     "default bounded range."
                 ),
             },
+            "quote_text": {
+                "type": "string", "maxLength": 2000,
+                "description": "Optional original text to quote with wechat_reply. Finds a unique visible message within quote_max_pages and verifies the quote preview before sending. Never falls back to a plain reply. Use observed text, not a paraphrase.",
+            },
+            "quote_sender": {
+                "type": "string", "maxLength": 100,
+                "description": "Optional observed sender for the quoted message. Must be verifiable; omitted when the screen does not expose sender identity.",
+            },
+            "quote_context": {
+                "type": "string", "maxLength": 2000,
+                "description": "Optional exact nearby text anchor to disambiguate the original. Required for OCR fuzzy matching (minimum 80%); changes to numbers or negation are rejected.",
+            },
+            "quote_max_pages": {
+                "type": "integer", "minimum": 1, "maximum": 8,
+                "description": "Maximum pages searched for the quoted original (default 3).",
+            },
             "max_messages": {
                 "type": "integer", "minimum": 1, "maximum": 200,
                 "description": "Default message-line limit (default 50).",

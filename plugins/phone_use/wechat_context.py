@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from .backend import ActionResult, CaptureResult, PhoneBackend
-from .wechat import open_chat
+from .wechat import open_chat, quote_message_candidates
 
 
 @dataclass(frozen=True)
@@ -227,6 +227,7 @@ def collect_context(
 
     current = opened.capture
     combined: list[str] = []
+    message_candidates: list[dict] = []
     screenshots: list[str] = []
     opened_images = 0
     max_images = max(0, min(int(max_images), 5))
@@ -269,6 +270,8 @@ def collect_context(
                         break
 
         page_lines = _visible_lines(current)
+        message_candidates.extend({**item, 'page': page_index + 1}
+                                  for item in quote_message_candidates(current)[:max(0, 200 - len(message_candidates))])
         # The same messages remain visible across a successful partial swipe.
         # Include coarse vertical positions and image regions so an image-only
         # change is not mistaken for a stuck/repeated page. Quantization absorbs
@@ -353,6 +356,8 @@ def collect_context(
         "stop_reason": stop_reason,
         "screenshots": screenshots,
         "image_count": opened_images if open_images else len(screenshots),
+        "message_candidates": message_candidates[:200],
+        "message_candidates_note": "Visible text anchors, not stable message IDs or guaranteed bubble boundaries. Element indices and bounds expire after navigation; quoted replies locate the original again.",
     }
     return ActionResult(
         ok=True,

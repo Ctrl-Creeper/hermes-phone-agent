@@ -10,6 +10,8 @@
 
 两个 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 插件 + 一个 Android 辅助 APK，让 Hermes 控制并响应虚拟 Android 手机。
 
+实验性[微信引用回复](QUOTED_REPLIES.md)：定位实际读到的原话，核对引用预览后再发送；尚待实机验证。
+
 ## 组件
 
 | 组件 | 类型 | 用途 |

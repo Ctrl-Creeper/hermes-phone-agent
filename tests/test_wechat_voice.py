@@ -140,3 +140,36 @@ def test_voice_options_reach_real_context_dispatch(monkeypatch):
     }))
     assert result['voice_count'] == 1
     assert result['voice_transcripts'][0]['text'] == '明天下午三点开会'
+
+
+def test_changing_partial_transcription_is_not_accepted(monkeypatch):
+    class ChangingVoice(VoiceBackend):
+        counter = 0
+
+        def capture(self, mode='hierarchy'):
+            if self.state == 'converted':
+                self.counter += 1
+                self.transcript = '识别中的内容' + str(self.counter)
+            return super().capture(mode)
+
+    result = collect(monkeypatch, ChangingVoice())
+    assert result.meta['voice_count'] == 0
+    assert 'text' not in result.meta['voice_transcripts'][0]
+
+
+def test_builtin_conversion_failure_has_explicit_status(monkeypatch):
+    result = collect(monkeypatch, VoiceBackend(transcript='转换失败'))
+    assert result.meta['voice_transcripts'][0]['status'] == 'conversion_failed'
+    assert result.meta['voice_count'] == 0
+
+
+def test_other_package_with_same_title_never_gets_long_press(monkeypatch):
+    class OtherApp(VoiceBackend):
+        def capture(self, mode='hierarchy'):
+            page = super().capture(mode)
+            page.current_package = 'com.example.other'
+            return page
+    backend = OtherApp()
+    result = collect(monkeypatch, backend)
+    assert not result.ok
+    assert backend.calls == []

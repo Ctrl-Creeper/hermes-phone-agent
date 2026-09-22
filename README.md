@@ -95,6 +95,12 @@ you explicitly want verbatim notification title/body delivery.
 
 ## Deterministic WeChat Workflows
 
+Voice conversion waits for the same visible transcription on two consecutive
+captures. Changing partial text, a moved voice anchor, conversion failure or an
+unexpected app is not accepted as a transcript. The text is still a spatial
+observation below a voice bubble, not an audio-grounded accuracy guarantee;
+real-device validation remains pending.
+
 Voice messages can be included in `wechat_collect_context` with
 `transcribe_voice: true` and `max_voice: 3` (maximum 5 attempts). This uses
 WeChat's built-in **Convert to Text / 转文字** menu; it does not play, download or

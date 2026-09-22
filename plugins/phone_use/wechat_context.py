@@ -35,7 +35,7 @@ def _transcribe_voice(backend: PhoneBackend, capture: CaptureResult,
     menu_open = False
     current = capture
     try:
-        if _find_chat_header(capture, chat) is None:
+        if capture.current_package != 'com.tencent.mm' or _find_chat_header(capture, chat) is None:
             record["status"] = "chat_changed"
             return record, capture
         pressed = backend.long_press(element=element.index, duration_ms=700)
@@ -55,6 +55,7 @@ def _transcribe_voice(backend: PhoneBackend, capture: CaptureResult,
             return record, current
         menu_open = False
         before = {(e.text or e.content_desc).strip() for e in capture.elements}
+        previous_text = None
         for _ in range(3):
             backend.wait(0.4)
             current = backend.capture(mode="image_hierarchy")
@@ -64,16 +65,26 @@ def _transcribe_voice(backend: PhoneBackend, capture: CaptureResult,
             left, _, right, bottom = element.bounds
             anchors = [e for e in _voice_bubbles(current)
                        if e.bounds == element.bounds
-                       and e.content_desc == element.content_desc]
+                       and e.content_desc == element.content_desc and e.text == element.text]
             if len(anchors) != 1:
                 # A new message or layout shift destroys the correspondence.
                 # Do not attribute new text using stale coordinates.
+                previous_text = None
                 continue
             next_voice_y = min((e.bounds[1] for e in _voice_bubbles(current)
                                 if e.bounds[1] >= bottom), default=current.height)
             lines = []
+            conversion_pending = False
             for e in sorted(current.elements, key=lambda n: n.bounds[1]):
                 text = (e.text or e.content_desc).strip()
+                nearby = (bottom <= e.bounds[1] < min(bottom + current.height * 0.2,
+                                                       current.height * 0.78, next_voice_y)
+                          and abs(e.bounds[0] - left) < current.width * 0.1)
+                if nearby and re.fullmatch(r'转换失败|无法转换|转换失败，请重试|Unable to convert|Conversion failed', text, re.I):
+                    record['status'] = 'conversion_failed'
+                    return record, current
+                if nearby and re.search(r'转换中|transcribing|converting', text, re.I):
+                    conversion_pending = True
                 if (text and text not in before
                         and bottom <= e.bounds[1] < min(bottom + current.height * 0.2,
                                                        current.height * 0.78, next_voice_y)
@@ -82,10 +93,12 @@ def _transcribe_voice(backend: PhoneBackend, capture: CaptureResult,
                         and not re.search(r"转换中|转换失败|无法转换|transcribing|converting|unable to|failed", text, re.I)
                         and text.casefold() not in _CONVERT_VOICE_LABELS):
                     lines.append(text)
-            if lines:
-                record.update(status="transcribed", text="\n".join(lines),
-                              verification="visible_text_below_voice")
+            candidate = '\n'.join(lines) if lines and not conversion_pending else None
+            if candidate and candidate == previous_text:
+                record.update(status="transcribed", text=candidate,
+                              verification="stable_visible_text_below_voice")
                 return record, current
+            previous_text = candidate
         return record, current
     except Exception:
         logger.warning("WeChat voice conversion could not be observed", exc_info=True)

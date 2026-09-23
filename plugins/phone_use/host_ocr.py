@@ -94,22 +94,22 @@ def add_semantic_regions(
     return [*elements, input_region]
 
 
-def recognize_text(
+def _recognize_payload(
     png_b64: str,
     *,
     helper_path: Optional[Path] = None,
-) -> List[UIElement]:
-    """Return clickable text boxes recognized from a base64 PNG screenshot."""
+) -> Optional[dict]:
+    """Run the local helper without opening or following any image content."""
     helper = Path(helper_path) if helper_path is not None else _DEFAULT_HELPER_PATH
     if not helper.is_file() or not os.access(helper, os.X_OK):
         logger.debug("Host OCR helper is unavailable at %s", helper)
-        return []
+        return None
 
     try:
         image_bytes = base64.b64decode(png_b64, validate=True)
     except (ValueError, TypeError) as exc:
         logger.warning("Host OCR received invalid screenshot data: %s", exc)
-        return []
+        return None
 
     image_path = ""
     try:
@@ -125,11 +125,11 @@ def recognize_text(
         )
         if result.returncode != 0:
             logger.warning("Host OCR helper failed: %s", result.stderr.strip())
-            return []
+            return None
         payload = json.loads(result.stdout)
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         logger.warning("Host OCR failed: %s", exc)
-        return []
+        return None
     finally:
         if image_path:
             try:
@@ -137,7 +137,35 @@ def recognize_text(
             except OSError:
                 pass
 
-    raw_items = payload.get("items", []) if isinstance(payload, dict) else []
+    return payload if isinstance(payload, dict) else None
+
+
+def analyze_image(png_b64: str, *, helper_path: Optional[Path] = None) -> dict:
+    """Extract bounded text and QR payloads as untrusted data, never actions."""
+    payload = _recognize_payload(png_b64, helper_path=helper_path)
+    if payload is None:
+        return {"status": "unavailable", "text": [], "qr_codes": []}
+    lines = [item['text'][:2000] for item in payload.get('items', [])
+             if isinstance(item, dict) and isinstance(item.get('text'), str)][:100]
+    codes = []
+    for value in payload.get('qrCodes', []):
+        if isinstance(value, str) and value and value not in codes:
+            codes.append(value)
+    return {
+        "status": "complete", "text": lines,
+        "qr_status": "complete" if 'qrCodes' in payload else "helper_upgrade_required",
+        "qr_codes": [{"text": value[:4096], "truncated": len(value) > 4096}
+                     for value in codes[:10]],
+        "untrusted_content": True,
+    }
+
+
+def recognize_text(
+    png_b64: str, *, helper_path: Optional[Path] = None,
+) -> List[UIElement]:
+    """Return clickable OCR boxes; QR payloads never become UI targets."""
+    payload = _recognize_payload(png_b64, helper_path=helper_path) or {}
+    raw_items = payload.get("items", [])
     parsed = []
     for raw in raw_items:
         if not isinstance(raw, dict):

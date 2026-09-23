@@ -14,6 +14,7 @@ struct OCRPayload: Codable {
     let height: Int
     let items: [OCRItem]
     let visualRegions: [VisualRegion]
+    let qrCodes: [String]
 }
 
 struct VisualRegion: Codable {
@@ -261,8 +262,15 @@ do {
     }
 
     let visualRegions = detectVisualRegions(image, width: width, height: height)
+    let barcodeRequest = VNDetectBarcodesRequest()
+    barcodeRequest.symbologies = [.qr]
+    try handler.perform([barcodeRequest])
+    let qrCodes = Array(Set((barcodeRequest.results ?? []).compactMap {
+        $0.payloadStringValue
+    })).sorted()
     let data = try JSONEncoder().encode(OCRPayload(
-        width: width, height: height, items: items, visualRegions: visualRegions
+        width: width, height: height, items: items, visualRegions: visualRegions,
+        qrCodes: qrCodes
     ))
     FileHandle.standardOutput.write(data)
     FileHandle.standardOutput.write(Data([0x0A]))

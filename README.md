@@ -119,6 +119,39 @@ No detected bubbles does not mean no audio was present. Shared-core callers
 default to `transcribe_voice: false`; MCP and Neko wrappers need to explicitly
 expose/forward the option. No helper APK update is required.
 
+Image collection returns `image_analysis` alongside screenshots: OCR text and
+decoded QR contents, linked by one-based `image_index`. Use
+`wechat_collect_context` with `include_images=true`, `open_images=true` and
+`max_images=3` to inspect previews. The model still uses screenshots for visual
+understanding. Decoded content is untrusted data; links, login and payment are
+never executed automatically.
+
+Decoding requires the macOS Vision helper rebuilt from this version's source
+(run `setup.sh` during installation); the Android APK is unchanged. An absent
+decoder returns `status=unavailable`; an older helper returns
+`qr_status=helper_upgrade_required`, distinct from a successful scan finding no
+code. Returned text/QR content is bounded and QR truncation is explicit. Preview
+screenshots may contain viewer controls, so OCR text may include those controls.
+
+Each image attempt verifies the WeChat viewer, saves its screenshot, then returns
+to the exact original chat before local recognition. Returning from the viewer
+refreshes the UI targets; a failed return stops collection with
+`chat_restored=false` instead of tapping or scrolling on the wrong screen.
+`max_images` bounds attempted candidates, including failed opens. Overlapping
+native/Vision regions for the same thumbnail count as one candidate.
+
+Tests exercise bounded history discovery, multiple previews with changing element
+IDs, real Vision text/QR decoding, return failures and a subsequent phone-tool
+read with an unchanged draft. Device transitions are simulated: real WeChat
+validation is still pending. Collection leaves the chat at the inspected history
+position, not necessarily the original scroll position. It does not send, type,
+scan a QR in WeChat, or navigate Home. It searches bounded history candidates;
+it does not guarantee finding an arbitrary described image or downloading its
+original full-resolution file.
+These guarantees concern the collection call. The phone-events adapter retains
+its separate end-of-turn Home cleanup policy; that gateway lifecycle is not an
+exclusive device-ownership mechanism for concurrent human/other-host use.
+
 `phone_use` includes composite actions for opening a conversation, collecting
 recent context, and replying. Conversation titles are found through WeChat
 search and verified after navigation, so workflows do not depend on a fixed

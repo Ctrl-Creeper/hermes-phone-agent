@@ -387,6 +387,17 @@ def _finish_failed_workflow(
     result: Any, task_id: str, session_id: str, had_scope: bool,
 ) -> Any:
     if had_scope and _result_failed(result):
+        try:
+            payload = json.loads(result) if isinstance(result, str) else result
+        except (TypeError, ValueError):
+            payload = {}
+        if (isinstance(payload, dict)
+                and payload.get("action") == "wechat_collect_context"
+                and payload.get("chat_restored") is False):
+            # The user may have switched apps during recognition. Invalidate
+            # inherited approval without sending a cleanup HOME to their screen.
+            _clear_workflow(task_id, session_id)
+            return result
         _finish_workflow(task_id, session_id)
     return result
 

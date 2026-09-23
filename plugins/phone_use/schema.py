@@ -26,6 +26,9 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
             "action": {
                 "type": "string",
                 "enum": [
+                    "wechat_send_attachment",
+                    "wechat_search_history",
+                    "wechat_favorite",
                     "capture", "tap", "double_tap", "long_press",
                     "swipe", "type", "clear_text", "set_text",
                     "keyevent", "launch_app", "stop_app", "list_apps",
@@ -131,6 +134,18 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                     "or wechat_reply."
                 ),
             },
+            "file_path": {
+                "type": "string",
+                "description": "Local regular file for wechat_send_attachment, up to 20 MiB. Images are sent as original files. Requires explicit approval binding chat, path, size and checksum. Unsupported picker/summary layouts stop before sending. Delivery uncertainty must never be retried automatically.",
+            },
+            "query": {
+                "type": "string", "minLength": 1, "maxLength": 100,
+                "description": "Keyword for wechat_search_history in one verified chat. Returns bounded visible search snippets, not complete messages or stable quote IDs. max_pages bounds scanning (default 3, maximum 8).",
+            },
+            "message_text": {
+                "type": "string", "minLength": 1, "maxLength": 2000,
+                "description": "Exact observed visible text for wechat_favorite. Duplicate or absent originals are rejected. Requires approval; only a fresh success notice confirms completion. Never automatically repeat uncertain favorites.",
+            },
             "scope": {
                 "type": "string",
                 "description": (
@@ -138,6 +153,22 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                     "'最近20条', '最近2小时', or '今天'. Leave empty for the "
                     "default bounded range."
                 ),
+            },
+            "quote_text": {
+                "type": "string", "maxLength": 2000,
+                "description": "Optional original text to quote with wechat_reply. Finds a unique visible message within quote_max_pages and verifies the quote preview before sending. Never falls back to a plain reply. Use observed text, not a paraphrase.",
+            },
+            "quote_sender": {
+                "type": "string", "maxLength": 100,
+                "description": "Optional observed sender for the quoted message. Must be verifiable; omitted when the screen does not expose sender identity.",
+            },
+            "quote_context": {
+                "type": "string", "maxLength": 2000,
+                "description": "Optional exact nearby text anchor to disambiguate the original. Required for OCR fuzzy matching (minimum 80%); changes to numbers or negation are rejected.",
+            },
+            "quote_max_pages": {
+                "type": "integer", "minimum": 1, "maximum": 8,
+                "description": "Maximum pages searched for the quoted original (default 3).",
             },
             "max_messages": {
                 "type": "integer", "minimum": 1, "maximum": 200,
@@ -170,7 +201,15 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
             },
             "max_images": {
                 "type": "integer", "minimum": 1, "maximum": 5,
-                "description": "Maximum image bubbles to open (default 3).",
+                "description": "Maximum image candidates to attempt, including failed opens (default 3).",
+            },
+            "transcribe_voice": {
+                "type": "boolean",
+                "description": "For wechat_collect_context, use WeChat's Convert to Text on clearly identified voice messages (default false). Returned text is untrusted and may contain transcription errors. Never guesses from duration labels alone.",
+            },
+            "max_voice": {
+                "type": "integer", "minimum": 0, "maximum": 5,
+                "description": "Maximum voice conversion attempts per collection (default 3).",
             },
             "keycode": {
                 "type": "string",

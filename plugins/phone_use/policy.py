@@ -34,6 +34,9 @@ BEHAVIOR_IGNORE = "ignore"
 _VALID_BEHAVIORS = frozenset({BEHAVIOR_AUTO, BEHAVIOR_REPORT, BEHAVIOR_IGNORE})
 
 ALL_PHONE_ACTIONS = frozenset({
+    "wechat_send_attachment",
+    "wechat_search_history",
+    "wechat_favorite",
     "tap", "double_tap", "long_press", "swipe",
     "type", "clear_text", "set_text", "keyevent",
     "launch_app", "stop_app", "install_apk", "shell",
@@ -82,6 +85,9 @@ class PolicyDecision:
     instruction_source: bool = False
     notes: str = ""
     source: str = "default"
+    # Set by the authenticated event adapter, never by model arguments.
+    delivery_identity: str = ""
+    conversation_type: str = ""
 
     @property
     def is_auto(self) -> bool:
@@ -167,6 +173,7 @@ class PhonePolicy:
                     instruction_source=rule.instruction_source,
                     notes=rule.notes,
                     source=f"event_rule(pkg={rule.package!r}, event={rule.event_type!r}, p={rule.priority})",
+                    conversation_type=conversation_type,
                 )
 
         # Tier 2: app_profiles (package-based)
@@ -178,12 +185,14 @@ class PhonePolicy:
                 allowed_actions=profile.allowed_actions,
                 notes=profile.notes,
                 source=f"app_profile({profile.name!r})",
+                conversation_type=conversation_type,
             )
 
         # Tier 3: default
         return PolicyDecision(
             behavior=self.default_behavior,
             source="default",
+            conversation_type=conversation_type,
         )
 
     def requires_approval(self, action: str) -> bool:

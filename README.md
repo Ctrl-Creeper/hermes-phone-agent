@@ -5,6 +5,9 @@ English | [中文](README_CN.md)
 Two [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugins + one
 Android helper APK that let Hermes control and react to a virtual Android phone.
 
+Experimental [WeChat quoted replies](QUOTED_REPLIES.md) locate an observed
+original and verify its quote preview before sending. Device validation pending.
+
 ## Components
 
 | Component | Type | Purpose |
@@ -95,6 +98,66 @@ you explicitly want verbatim notification title/body delivery.
 
 ## Deterministic WeChat Workflows
 
+Voice conversion waits for the same visible transcription on two consecutive
+captures. Changing partial text, a moved voice anchor, conversion failure or an
+unexpected app is not accepted as a transcript. The text is still a spatial
+observation below a voice bubble, not an audio-grounded accuracy guarantee;
+real-device validation remains pending.
+
+Voice messages can be included in `wechat_collect_context` with
+`transcribe_voice: true` and `max_voice: 3` (maximum 5 attempts). This uses
+WeChat's built-in **Convert to Text / 转文字** menu; it does not play, download or
+send audio. The returned `voice_transcripts` records contain observed text or a
+status such as `conversion_unavailable` / `unconfirmed`. The agent can interpret
+the text as conversation content, subject to the existing task policy.
+
+This is a bounded first implementation: it requires clearly labeled voice
+nodes in Android's accessibility tree. OCR duration labels alone are not enough.
+Transcription is read from newly visible text beneath the unchanged voice bubble
+and can contain recognition errors; it is not an audio-level verification.
+No detected bubbles does not mean no audio was present. Shared-core callers
+default to `transcribe_voice: false`; MCP and Neko wrappers need to explicitly
+expose/forward the option. No helper APK update is required.
+
+Image collection returns `image_analysis` alongside screenshots: OCR text and
+decoded QR contents, linked by one-based `image_index`. Use
+`wechat_collect_context` with `include_images=true`, `open_images=true` and
+`max_images=3` to inspect previews. The model still uses screenshots for visual
+understanding. Decoded content is untrusted data; links, login and payment are
+never executed automatically.
+
+Decoding requires the macOS Vision helper rebuilt from this version's source
+(run `setup.sh` during installation); the Android APK is unchanged. An absent
+decoder returns `status=unavailable`; an older helper returns
+`qr_status=helper_upgrade_required`, distinct from a successful scan finding no
+code. Returned text/QR content is bounded and QR truncation is explicit. Preview
+screenshots may contain viewer controls, so OCR text may include those controls.
+
+Each image attempt verifies the WeChat viewer, saves its screenshot, then returns
+to the exact original chat before local recognition. Returning from the viewer
+refreshes the UI targets; a failed return stops collection with
+`chat_restored=false` instead of tapping or scrolling on the wrong screen.
+`max_images` bounds attempted candidates, including failed opens. Overlapping
+native/Vision regions for the same thumbnail count as one candidate.
+
+Tests exercise bounded history discovery, multiple previews with changing element
+IDs, real Vision text/QR decoding, return failures and a subsequent phone-tool
+read with an unchanged draft. Device transitions are simulated: real WeChat
+validation is still pending. Collection leaves the chat at the inspected history
+position, not necessarily the original scroll position. It does not send, type,
+scan a QR in WeChat, or navigate Home. It searches bounded history candidates;
+it does not guarantee finding an arbitrary described image or downloading its
+original full-resolution file.
+These guarantees concern the collection call. The phone-events adapter retains
+its separate end-of-turn Home cleanup policy; that gateway lifecycle is not an
+exclusive device-ownership mechanism for concurrent human/other-host use.
+
+Experimental [attachment sending](ATTACHMENTS.md) adds checksum-bound file/original-image delivery through the File picker; device validation is pending.
+
+Experimental [history search](HISTORY_SEARCH.md) finds bounded keyword snippets inside a verified chat using WeChat's own search page.
+
+Experimental [text favorites](FAVORITES.md) save one exact visible message after approval; actual device menu validation remains pending.
+
 `phone_use` includes composite actions for opening a conversation, collecting
 recent context, and replying. Conversation titles are found through WeChat
 search and verified after navigation, so workflows do not depend on a fixed
@@ -119,15 +182,37 @@ The included reply flow retries navigation failures before sending; after a
 send attempt it never resends an unconfirmed message, preventing duplicate
 long replies after web research.
 
+For an authenticated automatic WeChat reply, the workflow snapshots confirmed
+incoming bubbles when it enters the chat and scans once more immediately before
+returning Home. Newly visible private messages are deferred through the normal
+event-policy queue. In groups, only a new left-side message containing
+the configured `@YourBot` trigger is eligible. Unknown direction/type, quote-like `sender:`
+summaries and unclassified OCR are ignored rather than guessed. This is a
+foreground-notification backstop, not a history sync; device-layout validation
+is still required before relying on it for a production inbox.
+
 Authenticated WeChat friend-request notifications bypass the model and are
 reported directly to the configured Telegram destination. Reply `/approve` to
 accept the named requester without setting a remark, or `/deny` to ignore it.
 The approval wait does not hold the phone-operation queue, so ordinary phone
 tasks continue while the request is pending.
 
+The friend workflow recognizes both the fixed New Friends entry and its dynamic
+request preview under Recommended. It supports Accept or View → Confirm Friend
+Request → Done without changing aliases or permissions. Success requires the
+named request's Added status; an unknown result is not retried automatically.
+Only uniquely identified, visible requests are handled; ambiguous or off-screen
+requests are reported for inspection. Final acceptance is not exercised by the
+offline tests or navigation-only device checks.
+
 The hybrid backend uses ADB for fast operations (screenshot, tap, swipe, keyevent, app management) and only starts Appium lazily when it needs Unicode text input or when ADB's `uiautomator dump` fails. If Appium is not installed, it falls back to pure ADB automatically.
 
 ## Using Without Hermes
+
+The shared phone stack also powers the
+[Neko phone_workflows plugin](https://github.com/Ctrl-Creeper/n.e.k.o_plugin_phone_workflows).
+For maintainers and coding agents, [DOWNSTREAMS.md](DOWNSTREAMS.md) describes both
+downstreams, helper APK identity, sync mechanisms and compatibility checks.
 
 To use phone control from Claude, Codex, GPT, Gemini, or any other agent framework (without Hermes), see the standalone [phone-mcp-server](https://github.com/Ctrl-Creeper/phone-mcp-server) repo. It provides MCP and HTTP servers with the same backend and security model.
 
@@ -144,6 +229,10 @@ Key points:
 - Configurable event filtering and sensitive data redaction
 
 ## Architecture
+
+Automatic WeChat tasks now retain device ownership through turn cleanup and
+persist reply receipts across restarts. See [automatic task reliability](AUTOMATION.md)
+for replay behavior, scope, and offline verification.
 
 ```
 ┌─────────────────────────────────────────────────┐

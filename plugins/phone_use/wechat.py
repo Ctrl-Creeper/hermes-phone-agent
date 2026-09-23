@@ -6,6 +6,7 @@ import logging
 import re
 import time
 import unicodedata
+from collections import Counter
 from difflib import SequenceMatcher
 from typing import Callable, Optional
 
@@ -37,9 +38,75 @@ _CONVERSATION_TAB_LABELS = frozenset({"wechat", "微信", "chats", "聊天"})
 _NEW_FRIENDS_LABELS = frozenset({"new friends", "新的朋友"})
 _ACCEPT_LABELS = frozenset({"accept", "接受", "添加"})
 _ADDED_LABELS = frozenset({"added", "accepted", "已添加", "已通过"})
+_VIEW_REQUEST_LABELS = frozenset({"view", "查看"})
+_CONFIRM_REQUEST_LABELS = frozenset({"confirm friend request", "通过朋友验证", "朋友验证"})
+_DONE_LABELS = frozenset({"done", "完成"})
 _SYMBOL_CHAT_HINT_TTL_SECONDS = 120.0
 _symbol_chat_hint: Optional[tuple[str, str, float]] = None
 _EMOJI_PLACEHOLDER = re.compile(r"\[(?:emoji|sticker|表情)\]", re.IGNORECASE)
+_EXIT_INBOX_QUOTE_PREFIX = re.compile(r"^[^:：]{1,80}[:：]\s*")
+_exit_inbox_callback: Optional[Callable[[str, str, list[dict]], None]] = None
+
+
+def set_exit_inbox_callback(callback: Optional[Callable[[str, str, list[dict]], None]]) -> None:
+    """Register the host-owned dispatcher for deferred foreground messages."""
+    global _exit_inbox_callback
+    _exit_inbox_callback = callback
+
+
+def _exit_inbox_text(element: UIElement, capture: CaptureResult) -> str:
+    """Return a confirmed incoming bubble's body, otherwise an empty string."""
+    if element.attributes.get("message_direction") != "incoming":
+        return ""
+    entry = _find_input(capture.elements)
+    bottom = (entry.bounds[1] if entry else capture.height) - int(capture.height * .04)
+    text = re.sub(r"\s+", " ", _label(element)).strip()
+    if (
+        not text
+        or element.bounds[1] < int(capture.height * .12)
+        or element.bounds[3] > bottom
+        or element.class_name == _MESSAGE_INPUT_CLASS
+        or re.fullmatch(r"\d{1,2}:\d{2}(?:\s*[AP]M)?", text, re.I)
+    ):
+        return ""
+    return text
+
+
+def capture_exit_inbox_baseline(capture: CaptureResult) -> Counter[str]:
+    """Snapshot visible incoming bubble text before an automated reply."""
+    return Counter(
+        unicodedata.normalize("NFC", _exit_inbox_text(element, capture)).casefold()
+        for element in capture.elements
+        if _exit_inbox_text(element, capture)
+    )
+
+
+def find_exit_inbox_messages(
+    baseline: Counter[str], capture: CaptureResult, *, conversation_type: str,
+) -> list[dict]:
+    """Return only confirmed newly visible inbound tasks before leaving WeChat.
+
+    OCR has no stable WeChat message IDs. Direction metadata is therefore
+    mandatory, and a group trigger must be the actual message body rather than
+    a quoted preview (which normally begins with ``sender:``).
+    """
+    kind = str(conversation_type or "").strip().casefold()
+    if capture.current_package != WECHAT_PACKAGE or kind not in {"group", "private"}:
+        return []
+    remaining = Counter(baseline)
+    found = []
+    for element in sorted(capture.elements, key=lambda item: (item.bounds[1], item.bounds[0])):
+        text = _exit_inbox_text(element, capture)
+        if not text:
+            continue
+        key = unicodedata.normalize("NFC", text).casefold()
+        if remaining[key]:
+            remaining[key] -= 1
+            continue
+        if kind == "group" and _EXIT_INBOX_QUOTE_PREFIX.match(text) is not None:
+            continue
+        found.append({"text": text, "direction": "incoming"})
+    return found
 
 
 def _has_emoji(value: str) -> bool:
@@ -364,13 +431,62 @@ def _find_row_action(
     candidates = [
         element for element in capture.elements
         if _label(element).casefold() in labels
-        and abs(element.center()[1] - row_y) <= 140
+        and element.enabled
+        and element.center()[0] >= capture.width * 0.7
+        and row.bounds[1] - capture.height * 0.015
+        <= element.center()[1] <= row.bounds[3] + capture.height * 0.015
     ]
     return min(
         candidates,
         key=lambda element: abs(element.center()[1] - row_y),
         default=None,
     )
+
+
+def _friend_request_row(capture: CaptureResult, requester: str) -> Optional[UIElement]:
+    # Approval applies to one exact person, not the fuzzy chat-search match.
+    # Preserve punctuation and reject duplicate names instead of choosing first.
+    def normalize(value: str) -> str:
+        return re.sub(r"\s+", "", value).casefold()
+    matches = [e for e in capture.elements
+               if normalize(_label(e)) == normalize(requester)
+               and capture.height * 0.12 < e.center()[1] < capture.height * 0.9
+               and e.center()[0] < capture.width * 0.7]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _friend_page(capture: CaptureResult, labels: frozenset[str]) -> bool:
+    return capture.current_package == WECHAT_PACKAGE and any(
+        _label(e).casefold() in labels and e.bounds[3] < capture.height * 0.1
+        and capture.width * 0.2 <= e.center()[0] <= capture.width * 0.8
+        for e in capture.elements
+    )
+
+
+def _new_friends_entry(capture: CaptureResult) -> Optional[UIElement]:
+    entry = _find_label(capture, _NEW_FRIENDS_LABELS)
+    if entry is not None:
+        return entry
+    if not _friend_page(capture, _CONTACT_LABELS):
+        return None
+    recommended = _find_label(capture, frozenset({"recommended", "推荐"}))
+    groups = _find_label(capture, frozenset({"group chats", "群聊"}))
+    if recommended is None or groups is None:
+        return None
+    # WeChat replaces the New Friends label with the latest request preview.
+    # Only this bounded section is a navigation entry, never an ordinary contact.
+    candidates = [e for e in capture.elements
+                  if e.enabled and _label(e)
+                  and recommended.bounds[3] < e.bounds[1] < groups.bounds[1]
+                  and capture.width * 0.12 < e.bounds[0] < capture.width * 0.5]
+    return min(candidates, key=lambda e: e.bounds[1], default=None)
+
+
+def _friend_added(capture: CaptureResult, requester: str) -> bool:
+    row = _friend_request_row(capture, requester)
+    return (_friend_page(capture, _NEW_FRIENDS_LABELS)
+            and row is not None
+            and _find_row_action(capture, row, _ADDED_LABELS) is not None)
 
 
 def _find_top_hit(capture: CaptureResult) -> Optional[UIElement]:
@@ -908,7 +1024,166 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
     )
 
 
-def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
+def _quote_normalize(text: str) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFC", text)).casefold()
+
+
+def quote_message_candidates(capture: CaptureResult) -> list[dict]:
+    """Visible text anchors, not stable message IDs. Reacquire before acting."""
+    entry = _find_input(capture.elements)
+    limit = min(entry.bounds[1] if entry else capture.height, int(capture.height * .8))
+    candidates = []
+    for e in sorted(capture.elements, key=lambda item: (item.bounds[1], item.bounds[0])):
+        text = _label(e)
+        if (not text or not e.enabled or e.class_name == _MESSAGE_INPUT_CLASS
+                or 'EditText' in e.class_name or e.bounds[1] < capture.height * .12
+                or e.bounds[3] >= limit or e.bounds[2] <= e.bounds[0]
+                or re.fullmatch(r'\d{1,2}:\d{2}(?:\s*[AP]M)?', text, re.I)):
+            continue
+        sender = str(e.attributes.get('sender') or '')
+        candidates.append({'text': text, 'sender': sender, 'element': e.index,
+                           'bounds': list(e.bounds)})
+    # OCR wraps a single message into adjacent lines. Keep individual anchors
+    # too; merged candidates are only hypotheses until the quote preview agrees.
+    wrapped = []
+    for i, first in enumerate(candidates):
+        previous = first
+        text = first['text']
+        for following in candidates[i + 1:i + 6]:
+            gap = following['bounds'][1] - previous['bounds'][3]
+            if not (0 <= gap <= capture.height * .008
+                    and abs(following['bounds'][0] - first['bounds'][0]) < capture.width * .06
+                    and following['sender'] == first['sender']):
+                break
+            text += '\n' + following['text']
+            wrapped.append({**first, 'text': text,
+                            'bounds': [first['bounds'][0], first['bounds'][1],
+                                       max(first['bounds'][2], following['bounds'][2]), following['bounds'][3]]})
+            previous = following
+    return candidates + wrapped
+
+
+def _quote_score(observed: str, wanted: str) -> float:
+    a, b = _quote_normalize(observed), _quote_normalize(wanted)
+    if a == b:
+        return 1.0
+    if min(len(a), len(b)) < 12:
+        return 0.0
+    # A small edit in quantities or negation is a semantic change, not OCR noise.
+    critical = r"\d+(?:[.:]\d+)*|[零〇一二两三四五六七八九十百千万亿]+|不|没|无|非|别|未|勿|莫|否|\b(?:no|not|never|without|cannot)\b|n't"
+    if re.findall(critical, observed.casefold()) != re.findall(critical, wanted.casefold()):
+        return 0.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _quote_preview(capture: CaptureResult, original: str, sender: str) -> bool:
+    """Verify a full sender:text preview directly above the current composer."""
+    entry = _find_input(capture.elements)
+    if entry is None or capture.current_package != WECHAT_PACKAGE:
+        return False
+    elements = sorted((e for e in capture.elements
+                       if entry.bounds[1] - capture.height * .16 <= e.bounds[1]
+                       and e.bounds[3] <= entry.bounds[1]), key=lambda e: e.bounds[1])
+    for index, e in enumerate(elements):
+        parts = re.split(r'[:：]', _label(e), maxsplit=1)
+        if len(parts) != 2 or not parts[0].strip():
+            continue
+        if sender and _quote_normalize(parts[0]) != _quote_normalize(sender):
+            continue
+        body = parts[1]
+        if _quote_normalize(body) == _quote_normalize(original):
+            return True
+        previous = e
+        for continuation in elements[index + 1:index + 6]:
+            if not (0 <= continuation.bounds[1] - previous.bounds[3] <= capture.height * .008
+                    and abs(continuation.bounds[0] - e.bounds[0]) < capture.width * .06):
+                break
+            body += _label(continuation)
+            if _quote_normalize(body) == _quote_normalize(original):
+                return True
+            previous = continuation
+    return False
+
+
+def _prepare_quote(backend: PhoneBackend, current: CaptureResult, chat: str,
+                   original: str, sender: str, context: str, max_pages: int) -> ActionResult:
+    def failure(reason: str) -> ActionResult:
+        return ActionResult(ok=False, action='wechat_reply', message=reason,
+                            capture=current, meta={'quote_status': reason})
+
+    seen = set()
+    for page in range(max_pages):
+        # Refresh after navigation/scroll: element indices are frame-local.
+        current = backend.capture(mode='hierarchy')
+        if not _chat_is_open(current, chat) or current.current_package != WECHAT_PACKAGE:
+            return failure('quote_chat_changed')
+        candidates = quote_message_candidates(current)
+        matches = []
+        for item in candidates:
+            score = _quote_score(item['text'], original)
+            if score < .8:
+                continue
+            if sender and item['sender'] and _quote_normalize(item['sender']) != _quote_normalize(sender):
+                continue
+            nearby = [other['text'] for other in candidates
+                      if other['element'] != item['element']
+                      and abs(other['bounds'][1] - item['bounds'][1]) < current.height * .2]
+            if context and not any(_quote_normalize(context) == _quote_normalize(line) for line in nearby):
+                continue
+            if score < 1 and not context:
+                continue  # 80% is retrieval, not proof of message identity.
+            matches.append(item)
+        # Prefer the full exact original over fuzzy substrings of the same OCR
+        # block, but never collapse two different message locations.
+        exact = [item for item in matches if _quote_score(item['text'], original) == 1]
+        if exact:
+            matches = exact
+        if len(matches) > 1:
+            return failure('quote_ambiguous')
+        if matches:
+            target = matches[0]
+            # Existing matching text in the composer area cannot prove a newly
+            # selected quote. Do not operate on an already quoted draft.
+            if _quote_preview(current, target['text'], sender):
+                return failure('quote_existing_preview')
+            pressed = _run_and_capture(backend, 'long_press',
+                lambda: backend.long_press(element=target['element'], duration_ms=700))
+            if not pressed.ok or pressed.capture is None:
+                return failure('quote_long_press_failed')
+            current = pressed.capture
+            buttons = [e for e in current.elements if e.enabled and _label(e).casefold() in {'引用', 'quote'}]
+            if current.current_package != WECHAT_PACKAGE or len(buttons) != 1:
+                if current.current_package == WECHAT_PACKAGE:
+                    backend.keyevent('BACK')
+                return failure('quote_menu_unavailable')
+            selected = _run_and_capture(backend, 'tap', lambda: backend.tap(element=buttons[0].index))
+            if not selected.ok or selected.capture is None:
+                return failure('quote_selection_failed')
+            current = _settle_capture(backend, selected.capture,
+                lambda c: _quote_preview(c, target['text'], sender))
+            if not _chat_is_open(current, chat) or not _quote_preview(current, target['text'], sender):
+                return failure('quote_preview_unverified')
+            return ActionResult(ok=True, action='quote', capture=current,
+                                meta={'quote_text': target['text'], 'quote_sender': sender,
+                                      'quote_verified': True})
+        signature = tuple(item['text'] for item in candidates)
+        if signature in seen:
+            return failure('quote_not_found')
+        seen.add(signature)
+        if page + 1 < max_pages:
+            moved = backend.swipe(direction='down',
+                from_xy=(current.width // 2, int(current.height * .3)),
+                to_xy=(current.width // 2, int(current.height * .65)), duration_ms=300)
+            if not moved.ok:
+                return failure('quote_scroll_failed')
+            backend.wait(.2)
+    return failure('quote_not_found')
+
+
+def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str = '',
+                quote_sender: str = '', quote_context: str = '', quote_max_pages: int = 3,
+                on_delivery: Optional[Callable[[str], None]] = None,
+                exit_inbox_conversation_type: str = "") -> ActionResult:
     opened = open_chat(backend, chat)
     if not opened.ok or opened.capture is None:
         return ActionResult(
@@ -916,47 +1191,73 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
             capture=opened.capture,
         )
 
+    quote_meta = {}
+    resolved_chat = opened.meta.get('resolved_chat', chat)
+    if quote_text:
+        quoted = _prepare_quote(backend, opened.capture, resolved_chat, quote_text,
+                                quote_sender, quote_context, quote_max_pages)
+        if not quoted.ok:
+            return quoted
+        opened.capture = quoted.capture
+        quote_meta = quoted.meta
+    baseline = (
+        capture_exit_inbox_baseline(opened.capture)
+        if exit_inbox_conversation_type in {"group", "private"} else None
+    )
+
+    def with_baseline(result: ActionResult) -> ActionResult:
+        if baseline is not None:
+            result.meta["_exit_inbox_baseline"] = baseline
+        return result
     focused = _prepare_text_input(backend, opened.capture)
     if not focused.ok or focused.capture is None:
-        return ActionResult(
+        return with_baseline(ActionResult(
             ok=False, action="wechat_reply", message=focused.message,
             capture=focused.capture,
-        )
+        ))
 
     typed = _run_and_capture(backend, "set_text", lambda: backend.set_text(text))
     if not typed.ok or typed.capture is None:
-        return ActionResult(
+        return with_baseline(ActionResult(
             ok=False, action="wechat_reply", message=typed.message,
             capture=typed.capture,
-        )
+        ))
 
     typed.capture = _settle_capture(
         backend, typed.capture,
         lambda value: _find_send(value) is not None,
     )
     send = _find_send(typed.capture)
+    if quote_text and (not _chat_is_open(typed.capture, resolved_chat)
+                       or not _quote_preview(typed.capture, quote_meta['quote_text'], quote_sender)):
+        return ActionResult(ok=False, action='wechat_reply',
+                            message='quote_preview_changed_before_send', capture=typed.capture,
+                            meta={'quote_status': 'quote_preview_changed_before_send'})
     if send is None:
-        return ActionResult(
+        return with_baseline(ActionResult(
             ok=False, action="wechat_reply",
             message="WeChat send button was not found after entering the reply",
             capture=typed.capture,
-        )
+        ))
 
+    reply_already_visible = bool(quote_text and _contains_reply(typed.capture, text))
+    if on_delivery is not None:
+        on_delivery("attempted")  # Commit before issuing the irreversible tap.
     sent = _run_and_capture(backend, "tap", lambda: backend.tap(element=send.index))
     if not sent.ok or sent.capture is None:
-        return ActionResult(
+        return with_baseline(ActionResult(
             ok=False, action="wechat_reply",
             message=sent.message or "WeChat send action failed",
             capture=sent.capture,
-            meta={"delivery_attempted": True, "delivery_status": "uncertain"},
-        )
+            meta={**quote_meta, "delivery_attempted": True, "delivery_status": "uncertain"},
+        ))
 
     # ADB reports success when it injects a tap, even if WeChat drops that
     # input while the keyboard or composer is still transitioning. Only retry
     # when fresh captures keep showing the Send button: after a real send the
     # draft clears and that button disappears. Use its current coordinates so
     # a refreshed OCR element index cannot point at a different control.
-    if not _contains_reply(sent.capture, text) and _find_send(sent.capture) is not None:
+    if not quote_text and not _contains_reply(sent.capture, text) and _find_send(sent.capture) is not None:
         sent.capture = _settle_capture(
             backend,
             sent.capture,
@@ -979,7 +1280,7 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
                 lambda: backend.tap(x=retry_x, y=retry_y),
             )
             if not sent.ok or sent.capture is None:
-                return ActionResult(
+                return with_baseline(ActionResult(
                     ok=False,
                     action="wechat_reply",
                     message=sent.message or "WeChat send retry failed",
@@ -988,47 +1289,93 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
                         "delivery_attempted": True,
                         "delivery_status": "uncertain",
                     },
-                )
+                ))
 
-    sent.capture = _settle_capture(
-        backend, sent.capture,
-        lambda value: _contains_reply(value, text),
-    )
-    if _contains_reply(sent.capture, text):
-        return ActionResult(
+    def delivery_visible(value):
+        if not _contains_reply(value, text):
+            return False
+        if not quote_text:
+            return True
+        # An original/old bubble must not masquerade as a newly sent reply.
+        # Without stable message IDs, an existing identical reply is uncertain.
+        return (not reply_already_visible and _find_send(value) is None
+                and not _quote_preview(value, quote_meta['quote_text'], quote_sender)
+                and _chat_is_open(value, resolved_chat))
+
+    sent.capture = _settle_capture(backend, sent.capture, delivery_visible)
+    if delivery_visible(sent.capture):
+        if on_delivery is not None:
+            on_delivery("confirmed")
+        return with_baseline(ActionResult(
             ok=True, action="wechat_reply",
             message=f"sent reply to WeChat chat {chat!r}", capture=sent.capture,
-            meta={"delivery_attempted": True, "delivery_status": "confirmed"},
-        )
+            meta={**quote_meta, "delivery_attempted": True, "delivery_status": "confirmed"},
+        ))
 
-    return ActionResult(
+    return with_baseline(ActionResult(
         ok=False, action="wechat_reply",
         message=(
             "WeChat send was attempted, but delivery could not be confirmed; "
             "the reply was not retried to avoid a duplicate"
         ),
         capture=sent.capture,
-        meta={"delivery_attempted": True, "delivery_status": "uncertain"},
-    )
+        meta={**quote_meta, "delivery_attempted": True, "delivery_status": "uncertain"},
+    ))
 
 
-def reply(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
+def reply(backend: PhoneBackend, chat: str, text: str, *, quote_text: str = '',
+          quote_sender: str = '', quote_context: str = '', quote_max_pages: int = 3,
+          on_delivery: Optional[Callable[[str], None]] = None,
+          exit_inbox_conversation_type: str = "") -> ActionResult:
     """Open a WeChat chat, recover once if needed, and always return Home."""
     result: ActionResult = ActionResult(
         ok=False, action="wechat_reply", message="WeChat reply did not run"
     )
+    attempted = False
+
+    def record_delivery(state: str) -> None:
+        nonlocal attempted
+        # If persisting fails, stop the flow before the tap; do not retry it.
+        attempted = True
+        if on_delivery is not None:
+            on_delivery(state)
+
     try:
-        for attempt in range(2):
+        if not all(isinstance(v, str) for v in (quote_text, quote_sender, quote_context)):
+            result.message = 'quote fields must be strings'
+            return result
+        if (quote_sender or quote_context) and not quote_text.strip():
+            result.message = 'quote_text is required with quote hints'
+            return result
+        if quote_text and (not quote_text.strip() or len(quote_text) > 2000
+                           or len(quote_context) > 2000 or len(quote_sender) > 100):
+            result.message = 'invalid quote text or hints'
+            return result
+        quote_max_pages = max(1, min(int(quote_max_pages), 8))
+        for attempt in range(1 if quote_text else 2):
             try:
-                result = _reply_once(backend, chat, text)
+                if quote_text or exit_inbox_conversation_type or on_delivery is not None:
+                    result = _reply_once(
+                        backend, chat, text, quote_text=quote_text,
+                        quote_sender=quote_sender, quote_context=quote_context,
+                        quote_max_pages=quote_max_pages,
+                        on_delivery=record_delivery if on_delivery is not None else None,
+                        exit_inbox_conversation_type=exit_inbox_conversation_type,
+                    )
+                else:
+                    # Keep the original positional call shape for existing
+                    # plugin integrations and their lightweight test doubles.
+                    result = _reply_once(backend, chat, text)
             except Exception as exc:
                 logger.exception("WeChat reply attempt %d failed", attempt + 1)
                 result = ActionResult(
-                    ok=False, action="wechat_reply", message=str(exc)
+                    ok=False, action="wechat_reply", message=str(exc),
+                    meta=({"delivery_attempted": True, "delivery_status": "uncertain"}
+                          if attempted else {}),
                 )
             if result.ok:
                 return result
-            if result.meta.get("delivery_attempted"):
+            if quote_text or result.meta.get("delivery_attempted"):
                 return result
             if attempt == 0:
                 logger.warning(
@@ -1048,6 +1395,24 @@ def reply(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
         )
         return result
     finally:
+        if quote_text and not result.ok:
+            result.meta['draft_may_remain'] = True
+        baseline = result.meta.pop("_exit_inbox_baseline", None)
+        if baseline is not None:
+            try:
+                before_home = backend.capture(mode="hierarchy")
+                deferred = find_exit_inbox_messages(
+                    baseline, before_home,
+                    conversation_type=exit_inbox_conversation_type,
+                )
+                result.meta["exit_inbox_count"] = len(deferred)
+                if deferred and _exit_inbox_callback is not None:
+                    _exit_inbox_callback(chat, exit_inbox_conversation_type, deferred)
+            except Exception:
+                # This is a loss-prevention supplement. A failed scan must not
+                # alter the completed reply outcome or cause a resend.
+                logger.exception("WeChat exit inbox scan failed")
+                result.meta["exit_inbox_scan_failed"] = True
         home = _run_and_capture(
             backend,
             "keyevent",
@@ -1067,6 +1432,201 @@ def reply(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
                     f"cleanup failed: {home.message}"
                 )
         _clear_symbol_chat_hint(chat)
+
+
+def send_attachment(backend: PhoneBackend, chat: str, path: str, sha256: str) -> ActionResult:
+    """Send one staged file only from a verifiable recipient/file summary."""
+    result = ActionResult(ok=False, action='wechat_send_attachment')
+    attempted = False
+    try:
+        opened = open_chat(backend, chat)
+        if not opened.ok or opened.capture is None:
+            result.message = opened.message
+            return result
+        resolved_chat = opened.meta.get('resolved_chat', chat)
+        staged = backend.stage_attachment(path, sha256)
+        result.meta['attachment'] = staged
+        # Exact filename avoids selecting another equally named original file.
+        stages = [({'更多功能', '更多', 'More', 'Attach'}, 'attachment_menu'),
+                  ({'文件', 'File'}, 'file_picker'),
+                  ({'手机存储', 'Phone storage'}, 'phone_storage'),
+                  ({'Download', 'Downloads', '下载'}, 'downloads'),
+                  ({staged['name']}, 'attachment')]
+        current = backend.capture(mode='hierarchy')
+        for labels, stage in stages:
+            if current.current_package != WECHAT_PACKAGE:
+                result.message = 'Unexpected app in attachment picker'
+                return result
+            matches = [e for e in current.elements if e.enabled and _label(e) in labels]
+            if len(matches) != 1:
+                result.message = f'Unsupported or ambiguous {stage}; no send attempted'
+                return result
+            tapped = _run_and_capture(backend, 'tap', lambda: backend.tap(element=matches[0].index))
+            if not tapped.ok or tapped.capture is None:
+                result.message = f'Could not open {stage}'
+                return result
+            current = tapped.capture
+        labels = {_label(e) for e in current.elements if e.enabled}
+        recipients = {f'发送给：{resolved_chat}', f'发送给: {resolved_chat}', f'Send to: {resolved_chat}'}
+        buttons = [e for e in current.elements if e.enabled and _label(e) in {'发送', 'Send'}]
+        if (current.current_package != WECHAT_PACKAGE or not labels.intersection(recipients)
+                or staged['name'] not in labels or len(buttons) != 1):
+            result.message = 'Recipient/file confirmation unverified; no send attempted'
+            return result
+        attempted = True  # Set before injection, including exceptions/capture failures.
+        backend.tap(element=buttons[0].index)
+        result.message = 'Attachment send attempted; verify delivery before any repeat'
+        # A filename visible in chat does not establish completed upload/delivery.
+        return result
+    except Exception as exc:
+        result.message = f'Attachment workflow failed: {exc}'
+        return result
+    finally:
+        result.meta.update(delivery_attempted=attempted,
+                           delivery_status='uncertain' if attempted else 'not_attempted')
+        try:
+            backend.keyevent('HOME')
+        except Exception:
+            result.meta['home_cleanup_failed'] = True
+
+
+def search_history(backend: PhoneBackend, chat: str, query: str, *, max_pages: int = 3) -> ActionResult:
+    """Search one verified conversation using WeChat's own history search."""
+    result = ActionResult(ok=False, action='wechat_search_history')
+    try:
+        if not isinstance(query, str) or not query.strip() or len(query) > 100:
+            result.message = 'query must contain 1–100 characters'
+            return result
+        max_pages = max(1, min(int(max_pages), 8))
+        opened = open_chat(backend, chat)
+        if not opened.ok or opened.capture is None:
+            result.message = opened.message
+            return result
+        current = backend.capture(mode='image_hierarchy')
+        for labels in ({'聊天信息', 'Chat Info', 'Chat info', '更多信息', 'More info'},
+                       {'查找聊天记录', 'Search Chat History', 'Search chat history'}):
+            matches = [e for e in current.elements if e.enabled and _label(e) in labels]
+            if current.current_package != WECHAT_PACKAGE or len(matches) != 1:
+                result.message = 'History search entry unsupported or ambiguous'
+                return result
+            navigated = _run_and_capture(backend, 'tap', lambda: backend.tap(element=matches[0].index))
+            if not navigated.ok or navigated.capture is None:
+                result.message = 'History search navigation failed'
+                return result
+            current = backend.capture(mode='image_hierarchy')
+        inputs = [e for e in current.elements if e.enabled and 'EditText' in e.class_name]
+        if current.current_package != WECHAT_PACKAGE or len(inputs) != 1:
+            result.message = 'Search input not uniquely identified'
+            return result
+        if not backend.tap(element=inputs[0].index).ok or not backend.set_text(query).ok:
+            result.message = 'Could not enter history query'
+            return result
+        if not backend.keyevent('ENTER').ok:
+            result.message = 'Could not submit history query'
+            return result
+        rows = []
+        seen = set()
+        for page in range(max_pages):
+            current = backend.capture(mode='image_hierarchy')
+            fields = [e for e in current.elements if 'EditText' in e.class_name]
+            if (current.current_package != WECHAT_PACKAGE or len(fields) != 1
+                    or _label(fields[0]) != query):
+                result.message = 'Search query/page changed; results discarded'
+                return result
+            if any(_label(e) in {'无搜索结果', '没有找到相关结果', 'No results', 'No Results'}
+                   for e in current.elements):
+                result.meta['stop_reason'] = 'no_results' if not rows else 'end_of_results'
+                break
+            visible = [e for e in sorted(current.elements, key=lambda e: (e.bounds[1], e.bounds[0]))
+                       if e.enabled and 'EditText' not in e.class_name
+                       and current.height * .15 <= e.bounds[1]
+                       and e.bounds[3] < current.height * .85
+                       and query.casefold() in _label(e).casefold()]
+            signature = tuple(_label(e) for e in visible)
+            if signature in seen:
+                result.meta['stop_reason'] = 'repeated_page'
+                break
+            seen.add(signature)
+            rows.extend({'text': _label(e), 'page': page + 1} for e in visible)
+            result.meta['pages'] = page + 1
+            if page + 1 < max_pages:
+                if not backend.swipe(direction='up', duration_ms=300).ok:
+                    result.meta['stop_reason'] = 'scroll_failed'
+                    break
+                backend.wait(.2)
+        result.ok = True
+        result.message = 'Collected visible history-search snippets'
+        result.meta.update(chat=chat, query=query, results=rows[:100], coverage='partial',
+                           untrusted_content=True)
+        result.meta.setdefault('stop_reason', 'page_limit')
+        return result
+    except Exception as exc:
+        result.message = f'History search failed: {exc}'
+        return result
+    finally:
+        try:
+            backend.keyevent('HOME')
+        except Exception:
+            result.meta['home_cleanup_failed'] = True
+
+
+def favorite_message(backend: PhoneBackend, chat: str, original: str) -> ActionResult:
+    """Favorite one exact visible text message; never guess a duplicate target."""
+    result = ActionResult(ok=False, action='wechat_favorite')
+    attempted = False
+    try:
+        if not isinstance(original, str) or not original.strip() or len(original) > 2000:
+            result.message = 'message_text must contain 1–2000 characters'
+            return result
+        opened = open_chat(backend, chat)
+        if not opened.ok:
+            result.message = opened.message
+            return result
+        resolved = opened.meta.get('resolved_chat', chat)
+        current = backend.capture(mode='hierarchy')
+        entry = _find_input(current.elements)
+        if current.current_package != WECHAT_PACKAGE or not _chat_is_open(current, resolved) or entry is None:
+            result.message = 'Chat changed before favorite selection'
+            return result
+        matches = [e for e in current.elements if e.enabled and _label(e) == original.strip()
+                   and current.height * .12 <= e.bounds[1] and e.bounds[3] < entry.bounds[1]]
+        if len(matches) != 1:
+            result.message = 'Original not visible or ambiguous; use a unique exact text anchor'
+            return result
+        pressed = _run_and_capture(backend, 'long_press',
+                                   lambda: backend.long_press(element=matches[0].index, duration_ms=700))
+        if not pressed.ok or pressed.capture is None:
+            result.message = 'Could not open message menu'
+            return result
+        current = pressed.capture
+        labels = {_label(e) for e in current.elements}
+        success_labels = {'已收藏', '收藏成功', 'Added to Favorites', 'Saved to Favorites'}
+        choices = [e for e in current.elements if e.enabled and _label(e) in {'收藏', 'Favorite', 'Favorites'}]
+        if (current.current_package != WECHAT_PACKAGE or not _chat_is_open(current, resolved)
+                or original.strip() not in labels or len(choices) != 1 or labels.intersection(success_labels)):
+            result.message = 'Favorite menu/target could not be verified'
+            return result
+        attempted = True
+        tapped = _run_and_capture(backend, 'tap', lambda: backend.tap(element=choices[0].index))
+        result.message = 'Favorite attempted; completion uncertain, do not automatically repeat'
+        if tapped.ok and tapped.capture is not None:
+            current = _settle_capture(backend, tapped.capture, lambda page:
+                page.current_package == WECHAT_PACKAGE and any(_label(e) in success_labels for e in page.elements))
+            if (current.current_package == WECHAT_PACKAGE and _chat_is_open(current, resolved)
+                    and any(_label(e) in success_labels for e in current.elements)):
+                result.ok = True
+                result.message = 'WeChat confirmed message added to Favorites'
+        return result
+    except Exception as exc:
+        result.message = f'Favorite workflow failed: {exc}'
+        return result
+    finally:
+        result.meta.update(favorite_attempted=attempted,
+                           favorite_status='confirmed' if result.ok else 'uncertain' if attempted else 'not_attempted')
+        try:
+            backend.keyevent('HOME')
+        except Exception:
+            result.meta['home_cleanup_failed'] = True
 
 
 def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult:
@@ -1094,11 +1654,21 @@ def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult
             return result
         current = launched.capture
 
-        request_row = _find_text(current.elements, requester)
+        request_row = _friend_request_row(current, requester)
+        request_actions = _ACCEPT_LABELS | _VIEW_REQUEST_LABELS
         accept = (
-            _find_row_action(current, request_row, _ACCEPT_LABELS)
-            if request_row is not None else None
+            _find_row_action(current, request_row, request_actions)
+            if request_row is not None and _friend_page(current, _NEW_FRIENDS_LABELS)
+            else None
         )
+        if _friend_added(current, requester):
+            result.ok = True
+            result.message = "WeChat requester is already added"
+            return result
+        if _friend_page(current, _NEW_FRIENDS_LABELS) and accept is None:
+            result.message = "Unique requester and Accept/View button were not found"
+            result.meta["stage"] = "request_list"
+            return result
         if accept is None:
             contacts = _find_label(
                 current,
@@ -1136,11 +1706,12 @@ def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult
             current = _settle_capture(
                 backend,
                 opened_contacts.capture,
-                lambda capture: _find_label(capture, _NEW_FRIENDS_LABELS) is not None,
+                lambda capture: _new_friends_entry(capture) is not None,
             )
-            new_friends = _find_label(current, _NEW_FRIENDS_LABELS)
+            new_friends = _new_friends_entry(current)
             if new_friends is None:
                 result.message = "WeChat New Friends entry was not found"
+                result.meta["stage"] = "contacts"
                 result.capture = current
                 return result
 
@@ -1154,20 +1725,29 @@ def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult
             current = _settle_capture(
                 backend,
                 opened_requests.capture,
-                lambda capture: _find_text(capture.elements, requester) is not None,
+                lambda capture: _friend_page(capture, _NEW_FRIENDS_LABELS)
+                and _friend_request_row(capture, requester) is not None,
             )
-            request_row = _find_text(current.elements, requester)
-            if request_row is None:
-                result.message = f"friend request from {requester!r} was not found"
+            request_row = _friend_request_row(current, requester)
+            if request_row is None or not _friend_page(current, _NEW_FRIENDS_LABELS):
+                result.message = f"unique friend request from {requester!r} was not found"
+                result.meta["stage"] = "request_list"
                 result.capture = current
                 return result
-            accept = _find_row_action(current, request_row, _ACCEPT_LABELS)
+            if _friend_added(current, requester):
+                result.ok = True
+                result.message = "WeChat requester is already added"
+                return result
+            accept = _find_row_action(current, request_row, request_actions)
 
         if accept is None or request_row is None:
-            result.message = f"Accept button for {requester!r} was not found"
+            result.message = f"Accept/View button for {requester!r} was not found"
+            result.meta["stage"] = "request_list"
             result.capture = current
             return result
 
+        result.meta["stage"] = "open_request"
+        result.meta["acceptance_attempted"] = _label(accept).casefold() in _ACCEPT_LABELS
         accepted = _run_and_capture(
             backend, "tap", lambda: backend.tap(element=accept.index),
         )
@@ -1178,17 +1758,44 @@ def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult
         current = _settle_capture(
             backend,
             accepted.capture,
-            lambda capture: (
-                (row := _find_text(capture.elements, requester)) is not None
-                and (
-                    _find_row_action(capture, row, _ADDED_LABELS) is not None
-                    or _find_row_action(capture, row, _ACCEPT_LABELS) is None
-                )
-            ),
+            lambda capture: _friend_added(capture, requester)
+            or _friend_page(capture, _CONFIRM_REQUEST_LABELS),
         )
-        request_row = _find_text(current.elements, requester)
-        if request_row is None or _find_row_action(current, request_row, _ACCEPT_LABELS):
+        # Only enter confirmation after selecting the named request ourselves.
+        # Do not change alias, tags or permissions, and never repeat a submit.
+        if _friend_page(current, _CONFIRM_REQUEST_LABELS):
+            result.meta["stage"] = "confirmation"
+            current = _settle_capture(
+                backend, current,
+                lambda c: _find_label(c, _DONE_LABELS) is not None,
+            )
+            done_buttons = [e for e in current.elements
+                            if e.enabled and _label(e).casefold() in _DONE_LABELS]
+            if not _friend_page(current, _CONFIRM_REQUEST_LABELS) or len(done_buttons) != 1:
+                result.message = "WeChat friend confirmation Done button was not found uniquely"
+                result.capture = current
+                return result
+            result.meta["acceptance_attempted"] = True
+            confirmed = _run_and_capture(
+                backend, "tap", lambda: backend.tap(element=done_buttons[0].index),
+            )
+            if not confirmed.ok or confirmed.capture is None:
+                result.message = confirmed.message or "friend confirmation could not be observed"
+                result.capture = confirmed.capture
+                return result
+            current = _settle_capture(
+                backend, confirmed.capture, lambda c: _friend_added(c, requester),
+            )
+        # Some versions open a profile/chat after Done. Read the requests list
+        # once more via Back; absence of an Accept button is not proof of success.
+        if not _friend_added(current, requester) and not _friend_page(current, _NEW_FRIENDS_LABELS):
+            backed = _run_and_capture(backend, "keyevent", lambda: backend.keyevent("BACK"))
+            if backed.ok and backed.capture is not None:
+                current = _settle_capture(backend, backed.capture,
+                                          lambda c: _friend_added(c, requester))
+        if not _friend_added(current, requester):
             result.message = f"accepting friend request from {requester!r} could not be confirmed"
+            result.meta["stage"] = "verify_added"
             result.capture = current
             return result
 
@@ -1197,7 +1804,7 @@ def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult
             action="wechat_accept_friend",
             message=f"accepted WeChat friend request from {requester!r}",
             capture=current,
-            meta={"requester": requester},
+            meta={**result.meta, "stage": "confirmed"},
         )
         return result
     except Exception as exc:

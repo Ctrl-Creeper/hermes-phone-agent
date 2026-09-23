@@ -171,13 +171,13 @@ app_profiles:
 
 event_rules:
 
-  # WeChat task inbox: groups require an explicit @Void_DRSAI in the message
+  # WeChat task inbox: groups require an explicit @YourBot in the message
   # body. The helper APK supplies conversation_type, so this cannot affect DMs.
   - match:
       package: "com.tencent.mm"
       event: notification
       conversation_type: group
-      body_regex: "(?i)@void_drsai(?![a-z0-9_])"
+      body_regex: "(?i)@YourBot(?![a-z0-9_])"
     behavior: auto
     instruction_source: true
     allowed_actions:
@@ -193,7 +193,7 @@ event_rules:
       - wechat_open_chat
       - wechat_reply
       - wechat_collect_context
-    notes: "Explicit @Void_DRSAI mention in a WeChat group; process as an automatic task."
+    notes: "Explicit @YourBot mention in a WeChat group; process as an automatic task."
     priority: 30
 
   # All other WeChat group notifications are silent. This keeps unmuted groups
@@ -203,7 +203,7 @@ event_rules:
       event: notification
       conversation_type: group
     behavior: ignore
-    notes: "Ignore WeChat group notifications unless the message explicitly mentions @Void_DRSAI."
+    notes: "Ignore WeChat group notifications unless the message explicitly mentions @YourBot."
     priority: 28
 
   # Friend DMs remain automatic and do not require an @ mention.

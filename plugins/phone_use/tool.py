@@ -26,6 +26,10 @@ from .policy import bind_event_policy as bind_event_policy, get_event_policy, ge
 from .wechat import open_chat as open_wechat_chat
 from .wechat import reply as reply_to_wechat
 from .wechat import accept_friend_request as accept_wechat_friend_request
+from .wechat import send_attachment
+from .adb_backend import read_attachment
+from .wechat import search_history
+from .wechat import favorite_message
 from .wechat_context import collect_context as collect_wechat_context
 
 logger = logging.getLogger(__name__)
@@ -49,12 +53,16 @@ _SAFE_ACTIONS = frozenset({
 # foreground app — agent-supplied 'package' is ignored to prevent bypass.
 _PACKAGE_AWARE_ACTIONS = frozenset({"launch_app", "stop_app"})
 _FIXED_PACKAGE_ACTIONS = {
+    "wechat_send_attachment": "com.tencent.mm",
+    "wechat_search_history": "com.tencent.mm",
+    "wechat_favorite": "com.tencent.mm",
     "wechat_open_chat": "com.tencent.mm",
     "wechat_reply": "com.tencent.mm",
     "wechat_collect_context": "com.tencent.mm",
 }
 
 _APPROVAL_REQUIRED = frozenset({
+    "wechat_search_history",
     "tap", "double_tap", "long_press", "swipe",
     "type", "clear_text", "set_text", "keyevent",
     "launch_app", "stop_app",
@@ -64,7 +72,7 @@ _APPROVAL_REQUIRED = frozenset({
 
 # These always prompt, even if session-auto-approve is on.
 _ALWAYS_PROMPT = frozenset({
-    "install_apk", "shell", "wechat_reply",
+    "install_apk", "shell", "wechat_reply", "wechat_send_attachment", "wechat_favorite",
 })
 
 _WORKFLOW_ACTIONS = _APPROVAL_REQUIRED
@@ -83,7 +91,7 @@ class WorkflowScope:
 _workflow_lock = threading.Lock()
 _workflow_scopes: Dict[tuple[str, str], WorkflowScope] = {}
 _reply_result_lock = threading.Lock()
-_reply_results: Dict[tuple[str, str, str, str], str] = {}
+_reply_results: Dict[tuple[str, str, str, str, str], str] = {}
 
 
 class DeviceOperationQueue:
@@ -93,9 +101,10 @@ class DeviceOperationQueue:
         self._condition = threading.Condition()
         self._waiting = deque()
         self._active = False
+        self._owner = ""
 
     @contextmanager
-    def turn(self, action: str, task_id: str = "", session_id: str = ""):
+    def turn(self, action: str, task_id: str = "", session_id: str = "", *, retain: bool = False):
         token = object()
         with self._condition:
             self._waiting.append(token)
@@ -105,10 +114,14 @@ class DeviceOperationQueue:
                     "phone device queue: queued action=%s position=%d task=%s session=%s",
                     action, position, task_id or "-", session_id or "-",
                 )
-            while self._active or self._waiting[0] is not token:
+            while self._active or (self._owner and self._owner != task_id) or (
+                not self._owner and self._waiting[0] is not token
+            ):
                 self._condition.wait()
-            self._waiting.popleft()
+            self._waiting.remove(token)
             self._active = True
+            if retain and task_id:
+                self._owner = task_id
 
         logger.info(
             "phone device queue: starting action=%s task=%s session=%s",
@@ -119,6 +132,16 @@ class DeviceOperationQueue:
         finally:
             with self._condition:
                 self._active = False
+                self._condition.notify_all()
+
+    def owns(self, task_id: str) -> bool:
+        with self._condition:
+            return bool(task_id) and self._owner == task_id
+
+    def release(self, task_id: str) -> None:
+        with self._condition:
+            if task_id and self._owner == task_id:
+                self._owner = ""
                 self._condition.notify_all()
 
 
@@ -191,7 +214,8 @@ def _get_backend() -> PhoneBackend:
 
 
 def reset_backend_for_tests() -> None:
-    global _backend, _session_auto_approve, _always_allow
+    global _backend, _session_auto_approve, _always_allow, _device_operation_queue
+    _device_operation_queue = DeviceOperationQueue()
     with _backend_lock:
         if _backend is not None:
             try:
@@ -208,24 +232,24 @@ def reset_backend_for_tests() -> None:
 
 
 def _reply_result_key(
-    task_id: str, session_id: str, chat: str, text: str,
-) -> tuple[str, str, str, str]:
-    return (task_id.strip(), session_id.strip(), chat.strip(), text)
+    task_id: str, session_id: str, chat: str, text: str, quote_identity: str = '',
+) -> tuple[str, str, str, str, str]:
+    return (task_id.strip(), session_id.strip(), chat.strip(), text, quote_identity)
 
 
 def _cached_reply_result(
-    task_id: str, session_id: str, chat: str, text: str,
+    task_id: str, session_id: str, chat: str, text: str, quote_identity: str = '',
 ) -> Optional[str]:
     if not task_id.strip():
         return None
     with _reply_result_lock:
         return _reply_results.get(
-            _reply_result_key(task_id, session_id, chat, text),
+            _reply_result_key(task_id, session_id, chat, text, quote_identity),
         )
 
 
 def _remember_reply_result(
-    task_id: str, session_id: str, chat: str, text: str, result: Any,
+    task_id: str, session_id: str, chat: str, text: str, result: Any, quote_identity: str = '',
 ) -> None:
     if not task_id.strip() or not isinstance(result, str):
         return
@@ -241,7 +265,7 @@ def _remember_reply_result(
         if len(_reply_results) >= 256:
             _reply_results.pop(next(iter(_reply_results)))
         _reply_results[
-            _reply_result_key(task_id, session_id, chat, text)
+            _reply_result_key(task_id, session_id, chat, text, quote_identity)
         ] = result
 
 
@@ -337,13 +361,20 @@ def _begin_workflow(args: Dict[str, Any], task_id: str, session_id: str) -> str:
 def _finish_workflow(task_id: str, session_id: str) -> bool:
     existed = _clear_workflow(task_id, session_id)
     if existed:
-        return_phone_home()
+        return_phone_home(task_id)
     return existed
 
 
 def _finish_turn(task_id: str, session_id: str) -> None:
-    _finish_workflow(task_id, session_id)
-    _clear_reply_results(task_id, session_id)
+    try:
+        if _device_operation_queue.owns(task_id):
+            _clear_workflow(task_id, session_id)
+            return_phone_home(task_id)
+        else:
+            _finish_workflow(task_id, session_id)
+    finally:
+        _clear_reply_results(task_id, session_id)
+        _device_operation_queue.release(task_id)
 
 
 def _result_failed(result: Any) -> bool:
@@ -364,6 +395,17 @@ def _finish_failed_workflow(
     result: Any, task_id: str, session_id: str, had_scope: bool,
 ) -> Any:
     if had_scope and _result_failed(result):
+        try:
+            payload = json.loads(result) if isinstance(result, str) else result
+        except (TypeError, ValueError):
+            payload = {}
+        if (isinstance(payload, dict)
+                and payload.get("action") == "wechat_collect_context"
+                and payload.get("chat_restored") is False):
+            # The user may have switched apps during recognition. Invalidate
+            # inherited approval without sending a cleanup HOME to their screen.
+            _clear_workflow(task_id, session_id)
+            return result
         _finish_workflow(task_id, session_id)
     return result
 
@@ -382,7 +424,7 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
         return _begin_workflow(args, task_id, session_id)
     if action == "end_workflow":
         _clear_workflow(task_id, session_id)
-        return_phone_home()
+        return_phone_home(task_id)
         return json.dumps({
             "ok": True,
             "workflow_active": False,
@@ -403,6 +445,13 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
             ),
         }), task_id, session_id, workflow_active)
 
+    if action == 'wechat_send_attachment':
+        try:
+            attachment, _ = read_attachment(args.get('file_path', ''))
+            args = {**args, 'file_path': attachment['path'], '_attachment': attachment}
+        except (OSError, ValueError, TypeError) as exc:
+            return json.dumps({'ok': False, 'error': str(exc)})
+
     # Approval gate. Globally restricted actions require a fresh approval even
     # in an auto event; ordinary interactive actions may run under an explicit
     # auto event allowlist.
@@ -413,9 +462,13 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
         and event_policy.instruction_source
         and event_policy.action_allowed(action)
     )
+    quote_identity = json.dumps([args.get(key, '') for key in (
+        'quote_text', 'quote_sender', 'quote_context',
+    )], ensure_ascii=False) if args.get('quote_text') else ''
     if trusted_auto_wechat_reply:
         cached = _cached_reply_result(
             task_id, session_id, args.get("chat", ""), args.get("text", ""),
+            quote_identity,
         )
         if cached is not None:
             return cached
@@ -442,7 +495,20 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
             "hint": "Ensure adb is on PATH and an emulator is running.",
         }), task_id, session_id, workflow_active)
 
-    # Policy enforcement: check if the action is allowed for the target package.
+    # A trusted automatic turn owns the phone across tool calls, including
+    # web research between them. The existing on_session_end hook releases it.
+    retain = bool(task_id and event_policy and event_policy.is_auto
+                  and event_policy.instruction_source)
+    with _device_operation_queue.turn(action, task_id, session_id, retain=retain):
+        result = _dispatch_under_device_lock(backend, action, args, task_id, session_id,
+                                            trusted_auto_wechat_reply, policy)
+    return _finish_failed_workflow(result, task_id, session_id, workflow_active)
+
+
+def _dispatch_under_device_lock(backend, action, args, task_id, session_id,
+                                trusted_auto_wechat_reply, policy):
+    # Check the foreground only after acquiring ownership: another task may
+    # have changed it while this task was waiting.
     # For launch_app/stop_app, the explicit 'package' arg is the target.
     # For all other non-safe actions, use the foreground app — ignore any
     # agent-supplied 'package' to prevent policy bypass.
@@ -456,50 +522,108 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
             fg = backend.current_app()
             target_pkg = fg.get("package", "")
         except Exception as e:
-            return _finish_failed_workflow(json.dumps({
+            return json.dumps({
                 "error": "unable to enforce phone app policy",
                 "action": action,
                 "reason": f"foreground app lookup failed: {e}",
-            }), task_id, session_id, workflow_active)
+            })
         if not target_pkg:
-            return _finish_failed_workflow(json.dumps({
+            return json.dumps({
                 "error": "unable to enforce phone app policy",
                 "action": action,
                 "reason": "foreground app package is unknown",
-            }), task_id, session_id, workflow_active)
+            })
     if target_pkg:
         decision = policy.check_action(action, target_pkg)
         if not decision.action_allowed(action):
-            return _finish_failed_workflow(json.dumps({
+            return json.dumps({
                 "error": "blocked by phone policy",
                 "action": action,
                 "package": target_pkg,
                 "reason": decision.notes or f"policy restricts '{action}' on '{target_pkg}'",
                 "hint": "Edit phone-policy.yaml to change this rule.",
-            }), task_id, session_id, workflow_active)
+            })
 
-    with _device_operation_queue.turn(action, task_id, session_id):
-        try:
+    try:
+        if trusted_auto_wechat_reply:
+            quote_identity = json.dumps([args.get(key, '') for key in (
+                'quote_text', 'quote_sender', 'quote_context',
+            )], ensure_ascii=False) if args.get('quote_text') else ''
+            cached = _cached_reply_result(task_id, session_id, args.get("chat", ""),
+                                          args.get("text", ""), quote_identity)
+            if cached is not None:
+                return cached
+            decision = get_event_policy()
+            if decision.delivery_identity:
+                result = _durable_wechat_reply(backend, args, decision.delivery_identity)
+            else:
+                result = _dispatch(backend, action, args)
+        else:
             result = _dispatch(backend, action, args)
-        except ValueError as e:
-            result = _error_response_with_capture(backend, action, str(e))
-        except Exception as e:
-            logger.exception("phone_use %s failed", action)
-            result = _error_response_with_capture(
-                backend, action, f"{action} failed: {e}",
-            )
+    except Exception as e:
+        logger.exception("phone_use %s failed", action)
+        result = _error_response_with_capture(backend, action, f"{action} failed: {e}")
 
     if trusted_auto_wechat_reply:
+        quote_identity = json.dumps([args.get(key, '') for key in (
+            'quote_text', 'quote_sender', 'quote_context',
+        )], ensure_ascii=False) if args.get('quote_text') else ''
         _remember_reply_result(
             task_id,
             session_id,
             args.get("chat", ""),
             args.get("text", ""),
             result,
+            quote_identity,
         )
-    return _finish_failed_workflow(
-        result, task_id, session_id, workflow_active,
-    )
+    return result
+
+
+def _durable_wechat_reply(backend, args, identity: str) -> str:
+    from .delivery import DeliveryJournal, state_directory
+
+    chat, text = args.get("chat", ""), args.get("text", "")
+    if not isinstance(chat, str) or not chat.strip() or not isinstance(text, str) or not text.strip():
+        return json.dumps({"ok": False, "error": "wechat_reply requires chat and text"})
+    journal = DeliveryJournal(state_directory())
+    quote_options = {key: args[key] for key in (
+        'quote_text', 'quote_sender', 'quote_context', 'quote_max_pages',
+    ) if key in args}
+    event_policy = get_event_policy()
+    if (event_policy is not None and event_policy.is_auto
+            and event_policy.instruction_source
+            and event_policy.conversation_type in {'group', 'private'}):
+        quote_options['exit_inbox_conversation_type'] = event_policy.conversation_type
+    quote_identity = json.dumps([args.get(key, '') for key in (
+        'quote_text', 'quote_sender', 'quote_context',
+    )], ensure_ascii=False) if args.get('quote_text') else ''
+    with journal.receipt(identity, _resolve_android_serial() or "default", chat,
+                         text, quote_identity) as receipt:
+        state = receipt.state
+        if state != "prepared":
+            return json.dumps({
+                "ok": state == "confirmed", "action": "wechat_reply",
+                "message": ("Previously confirmed reply; not sent again" if state == "confirmed"
+                            else "Previous send may have completed; not sent again. Report uncertainty through Telegram."),
+                "meta": {"delivery_attempted": True, "delivery_status":
+                         "confirmed" if state == "confirmed" else "uncertain", "duplicate_suppressed": True},
+            })
+        receipt.record("prepared")
+        try:
+            result = reply_to_wechat(backend, chat, text, on_delivery=receipt.record,
+                                     **quote_options)
+        except Exception as exc:
+            state = receipt.state
+            if state == "prepared":
+                raise
+            result = ActionResult(
+                ok=state == "confirmed", action="wechat_reply", message=str(exc),
+                meta={"delivery_attempted": True, "delivery_status":
+                      "confirmed" if state == "confirmed" else "uncertain"},
+            )
+        if result.meta.get("delivery_attempted") and receipt.state != "confirmed":
+            receipt.record("uncertain")
+        return _text_response(result)
 
 
 def _request_approval(
@@ -604,6 +728,14 @@ def _request_approval(
 
 
 def _summarize_action(action: str, args: Dict[str, Any]) -> str:
+    if action == 'wechat_send_attachment':
+        attachment = args.get('_attachment', {})
+        return (f"send file {args.get('file_path')!r} to WeChat {args.get('chat')!r}; "
+                f"size={attachment.get('size')} SHA-256={attachment.get('sha256')}")
+    if action == 'wechat_search_history':
+        return f"search WeChat history in {args.get('chat')!r} for {args.get('query')!r}"
+    if action == 'wechat_favorite':
+        return f"favorite exact message {args.get('message_text')!r} in WeChat {args.get('chat')!r}"
     if action in ("tap", "double_tap", "long_press"):
         if args.get("element") is not None:
             return f"{action} element #{args['element']}"
@@ -634,15 +766,29 @@ def _summarize_action(action: str, args: Dict[str, Any]) -> str:
         return f"open WeChat chat {args.get('chat', '?')!r}"
     if action == "wechat_reply":
         text = args.get("text", "")
-        return (
-            f"reply to WeChat chat {args.get('chat', '?')!r} with: {text}"
-        )
+        description = f"reply to WeChat chat {args.get('chat', '?')!r} with: {text}"
+        if args.get('quote_text'):
+            description += (f"; quoting {args['quote_text']!r}"
+                            f"; sender={args.get('quote_sender', '')!r}"
+                            f"; context={args.get('quote_context', '')!r}")
+        return description
     if action == "begin_workflow":
         return f"approve phone workflow: {args.get('goal', '?')}"
     return action
 
 
 def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
+    if action == 'wechat_send_attachment':
+        attachment = args.get('_attachment')
+        if not attachment:
+            return json.dumps({'ok': False, 'error': 'Attachment preflight required'})
+        return _text_response(send_attachment(backend, args.get('chat', ''),
+                                             attachment['path'], attachment['sha256']))
+    if action == 'wechat_search_history':
+        return _text_response(search_history(backend, args.get('chat', ''), args.get('query', ''),
+                                             max_pages=args.get('max_pages', 3)))
+    if action == 'wechat_favorite':
+        return _text_response(favorite_message(backend, args.get('chat', ''), args.get('message_text', '')))
     if action == "capture":
         mode = args.get("mode", "som")
         if mode not in ("som", "screenshot", "hierarchy"):
@@ -760,7 +906,17 @@ def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
     if action == "wechat_reply":
         chat = args.get("chat", "")
         text = args.get("text", "")
-        res = reply_to_wechat(backend, chat, text)
+        quote_options = {key: args[key] for key in (
+            'quote_text', 'quote_sender', 'quote_context', 'quote_max_pages',
+        ) if key in args}
+        event_policy = get_event_policy()
+        conversation_type = ""
+        if (event_policy is not None and event_policy.is_auto
+                and event_policy.instruction_source):
+            conversation_type = event_policy.conversation_type
+        if conversation_type:
+            quote_options['exit_inbox_conversation_type'] = conversation_type
+        res = reply_to_wechat(backend, chat, text, **quote_options)
         logger.info(
             "wechat_reply outcome: ok=%s chat=%r detail=%s",
             res.ok,
@@ -784,6 +940,8 @@ def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
             include_images=include_images,
             open_images=open_images,
             max_images=int(args.get("max_images", 3)),
+            transcribe_voice=args.get("transcribe_voice", False) is True,
+            max_voice=int(args.get("max_voice", 3)),
         )
         payload = dict(res.meta)
         screenshots = payload.pop("screenshots", [])
@@ -933,11 +1091,11 @@ def _error_response_with_capture(
     return json.dumps(payload)
 
 
-def return_phone_home() -> None:
+def return_phone_home(task_id: str = "") -> None:
     """Best-effort workflow cleanup used by the phone event adapter."""
     try:
         backend = _get_backend()
-        with _device_operation_queue.turn("return_home"):
+        with _device_operation_queue.turn("return_home", task_id):
             res = backend.keyevent("HOME")
             _maybe_follow_capture(backend, res, True)
     except Exception:

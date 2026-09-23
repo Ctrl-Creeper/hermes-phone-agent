@@ -13,10 +13,10 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
-import stat
 import uuid
 from pathlib import Path
 

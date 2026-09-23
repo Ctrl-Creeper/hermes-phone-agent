@@ -1570,6 +1570,65 @@ def search_history(backend: PhoneBackend, chat: str, query: str, *, max_pages: i
             result.meta['home_cleanup_failed'] = True
 
 
+def favorite_message(backend: PhoneBackend, chat: str, original: str) -> ActionResult:
+    """Favorite one exact visible text message; never guess a duplicate target."""
+    result = ActionResult(ok=False, action='wechat_favorite')
+    attempted = False
+    try:
+        if not isinstance(original, str) or not original.strip() or len(original) > 2000:
+            result.message = 'message_text must contain 1–2000 characters'
+            return result
+        opened = open_chat(backend, chat)
+        if not opened.ok:
+            result.message = opened.message
+            return result
+        resolved = opened.meta.get('resolved_chat', chat)
+        current = backend.capture(mode='hierarchy')
+        entry = _find_input(current.elements)
+        if current.current_package != WECHAT_PACKAGE or not _chat_is_open(current, resolved) or entry is None:
+            result.message = 'Chat changed before favorite selection'
+            return result
+        matches = [e for e in current.elements if e.enabled and _label(e) == original.strip()
+                   and current.height * .12 <= e.bounds[1] and e.bounds[3] < entry.bounds[1]]
+        if len(matches) != 1:
+            result.message = 'Original not visible or ambiguous; use a unique exact text anchor'
+            return result
+        pressed = _run_and_capture(backend, 'long_press',
+                                   lambda: backend.long_press(element=matches[0].index, duration_ms=700))
+        if not pressed.ok or pressed.capture is None:
+            result.message = 'Could not open message menu'
+            return result
+        current = pressed.capture
+        labels = {_label(e) for e in current.elements}
+        success_labels = {'已收藏', '收藏成功', 'Added to Favorites', 'Saved to Favorites'}
+        choices = [e for e in current.elements if e.enabled and _label(e) in {'收藏', 'Favorite', 'Favorites'}]
+        if (current.current_package != WECHAT_PACKAGE or not _chat_is_open(current, resolved)
+                or original.strip() not in labels or len(choices) != 1 or labels.intersection(success_labels)):
+            result.message = 'Favorite menu/target could not be verified'
+            return result
+        attempted = True
+        tapped = _run_and_capture(backend, 'tap', lambda: backend.tap(element=choices[0].index))
+        result.message = 'Favorite attempted; completion uncertain, do not automatically repeat'
+        if tapped.ok and tapped.capture is not None:
+            current = _settle_capture(backend, tapped.capture, lambda page:
+                page.current_package == WECHAT_PACKAGE and any(_label(e) in success_labels for e in page.elements))
+            if (current.current_package == WECHAT_PACKAGE and _chat_is_open(current, resolved)
+                    and any(_label(e) in success_labels for e in current.elements)):
+                result.ok = True
+                result.message = 'WeChat confirmed message added to Favorites'
+        return result
+    except Exception as exc:
+        result.message = f'Favorite workflow failed: {exc}'
+        return result
+    finally:
+        result.meta.update(favorite_attempted=attempted,
+                           favorite_status='confirmed' if result.ok else 'uncertain' if attempted else 'not_attempted')
+        try:
+            backend.keyevent('HOME')
+        except Exception:
+            result.meta['home_cleanup_failed'] = True
+
+
 def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult:
     """Accept one named WeChat friend request and always return Home."""
     requester = requester.strip()

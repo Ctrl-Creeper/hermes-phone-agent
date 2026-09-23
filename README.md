@@ -156,6 +156,8 @@ Experimental [attachment sending](ATTACHMENTS.md) adds checksum-bound file/origi
 
 Experimental [history search](HISTORY_SEARCH.md) finds bounded keyword snippets inside a verified chat using WeChat's own search page.
 
+Experimental [text favorites](FAVORITES.md) save one exact visible message after approval; actual device menu validation remains pending.
+
 `phone_use` includes composite actions for opening a conversation, collecting
 recent context, and replying. Conversation titles are found through WeChat
 search and verified after navigation, so workflows do not depend on a fixed

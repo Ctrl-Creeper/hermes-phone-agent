@@ -36,6 +36,7 @@ _VALID_BEHAVIORS = frozenset({BEHAVIOR_AUTO, BEHAVIOR_REPORT, BEHAVIOR_IGNORE})
 ALL_PHONE_ACTIONS = frozenset({
     "wechat_send_attachment",
     "wechat_search_history",
+    "wechat_favorite",
     "tap", "double_tap", "long_press", "swipe",
     "type", "clear_text", "set_text", "keyevent",
     "launch_app", "stop_app", "install_apk", "shell",

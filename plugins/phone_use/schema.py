@@ -28,6 +28,7 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                 "enum": [
                     "wechat_send_attachment",
                     "wechat_search_history",
+                    "wechat_favorite",
                     "capture", "tap", "double_tap", "long_press",
                     "swipe", "type", "clear_text", "set_text",
                     "keyevent", "launch_app", "stop_app", "list_apps",
@@ -140,6 +141,10 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
             "query": {
                 "type": "string", "minLength": 1, "maxLength": 100,
                 "description": "Keyword for wechat_search_history in one verified chat. Returns bounded visible search snippets, not complete messages or stable quote IDs. max_pages bounds scanning (default 3, maximum 8).",
+            },
+            "message_text": {
+                "type": "string", "minLength": 1, "maxLength": 2000,
+                "description": "Exact observed visible text for wechat_favorite. Duplicate or absent originals are rejected. Requires approval; only a fresh success notice confirms completion. Never automatically repeat uncertain favorites.",
             },
             "scope": {
                 "type": "string",

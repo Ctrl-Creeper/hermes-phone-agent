@@ -33,7 +33,7 @@ from plugins.phone_events.adapter import (
     _resolve_adb_serial as resolve_event_adb_serial,
     _wrap_phone_data,
 )
-from plugins.phone_events.event_filter import EventFilter, PhoneEvent
+from plugins.phone_events.event_filter import PhoneEvent
 from plugins.phone_events.logcat_monitor import LogcatMonitor
 
 
@@ -2831,7 +2831,67 @@ def test_wechat_context_action_returns_structured_collection(monkeypatch):
     assert result["ok"] is True
     assert result["lines"] == ["第一条", "第二条"]
     assert result["stop_reason"] == "message_limit"
+    assert observed["include_images"] is False
+    assert observed["open_images"] is False
+    assert observed["max_pages"] == 8  # An explicit history scope still allows paging.
+
+
+def test_wechat_context_default_reads_current_page_without_images(monkeypatch):
+    observed = {}
+
+    def collect(backend, chat, **kwargs):
+        observed.update(kwargs)
+        return phone_tool.ActionResult(ok=True, action="wechat_collect_context",
+                                       meta={"screenshots": []})
+
+    monkeypatch.setattr(phone_tool, "collect_wechat_context", collect)
+    phone_tool._dispatch(object(), "wechat_collect_context", {"chat": "群聊"})
+    assert observed["max_pages"] == 1
+    assert observed["include_images"] is False
+    assert observed["open_images"] is False
+
+    phone_tool._dispatch(object(), "wechat_collect_context", {
+        "chat": "群聊", "include_images": True, "open_images": True, "max_pages": 3,
+    })
+    assert observed["max_pages"] == 3
     assert observed["include_images"] is True
+    assert observed["open_images"] is True
+
+
+def test_wechat_context_does_not_search_for_images_when_disabled(monkeypatch):
+    from plugins.phone_use import wechat_context
+
+    page = phone_tool.CaptureResult(
+        mode="hierarchy", width=1080, height=2400,
+        current_package="com.tencent.mm",
+        elements=[UIElement(index=1, class_name="host.ocr.Text", text="latest message",
+                            bounds=(180, 400, 700, 470))],
+    )
+    monkeypatch.setattr(wechat_context, "open_chat", lambda *_: phone_tool.ActionResult(
+        ok=True, action="wechat_open_chat", capture=page,
+    ))
+
+    class Backend:
+        def __init__(self):
+            self.swipes = 0
+
+        def capture(self, mode):
+            return page
+
+        def swipe(self, **kwargs):
+            self.swipes += 1
+            return phone_tool.ActionResult(ok=True, action="swipe")
+
+        def wait(self, seconds):
+            pass
+
+    phone = Backend()
+    result = wechat_context.collect_context(
+        phone, "群聊", max_messages=1, include_images=False, open_images=True,
+    )
+    assert result.ok
+    assert result.meta["stop_reason"] == "message_limit"
+    assert phone.swipes == 0
 
 
 def test_wechat_context_action_can_explicitly_disable_images(monkeypatch):
@@ -4106,6 +4166,8 @@ def test_task_source_channel_prompt_is_constant_and_describes_preapproval():
     assert "刚刚发生了什么" in prompts[0]
     assert "刚刚微信发生了啥" in prompts[0]
     assert "wechat_collect_context" in prompts[0]
+    assert "max_pages=1" in prompts[0]
+    assert "open_images=true" in prompts[0]
     assert "web_search" in prompts[0]
     assert "explicit scope" in prompts[0]
     assert "exactly one acknowledgement" in prompts[0]

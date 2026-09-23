@@ -44,9 +44,11 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                     "automatic task events are pre-authorized by host policy; "
                     "other conversations still require approval. The call shows the exact chat "
                     "and text, sends it, and always returns to Home."
-                    " Use 'wechat_collect_context' for bounded multi-page "
-                    "reading before a complex reply; pass the original scope "
-                    "phrase when the message specifies one."
+                    " Use 'wechat_collect_context' only when the available "
+                    "message does not provide enough context, or the request "
+                    "explicitly needs history or images. It reads one current "
+                    "page by default; pass the original scope phrase for "
+                    "explicit history requests."
                     " For a general multi-step operation, call "
                     "'begin_workflow' once with the complete goal, perform "
                     "all approved steps, then always call 'end_workflow'. "
@@ -143,7 +145,7 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
             },
             "max_pages": {
                 "type": "integer", "minimum": 1, "maximum": 12,
-                "description": "Maximum WeChat history pages (default 8).",
+                "description": "Maximum history pages (default 1; 8 for explicit scope or image search).",
             },
             "max_minutes": {
                 "type": "integer", "minimum": 1, "maximum": 1440,
@@ -153,8 +155,8 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                 "type": "boolean",
                 "description": (
                     "Return up to five full-page screenshots for visual "
-                    "analysis (default true). Set false only when the request "
-                    "is explicitly text-only. Never opens uncertain image bubbles."
+                    "analysis (default false). Enable only for an image-related "
+                    "request. Never opens uncertain image bubbles."
                 ),
             },
             "open_images": {
@@ -162,8 +164,8 @@ PHONE_USE_SCHEMA: Dict[str, Any] = {
                 "description": (
                     "Open clearly identified image bubbles in the "
                     "current WeChat history and return preview screenshots for "
-                    "visual analysis (default true). Set false only when the "
-                    "request is explicitly text-only."
+                    "visual analysis (default false). Enable only when the "
+                    "request needs a specific image."
                 ),
             },
             "max_images": {

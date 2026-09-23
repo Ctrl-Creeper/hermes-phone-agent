@@ -1,5 +1,7 @@
 """Public behavior for the conservative end-of-chat WeChat inbox scan."""
 
+import re
+
 from plugins.phone_use.backend import CaptureResult, UIElement
 from plugins.phone_use.wechat import capture_exit_inbox_baseline, find_exit_inbox_messages
 
@@ -45,6 +47,28 @@ def test_exit_inbox_group_defers_new_bodies_for_configured_policy_and_skips_quot
     ]
 
 
+def test_exit_inbox_group_trigger_comes_from_event_policy():
+    from plugins.phone_use.policy import EventRule, PhonePolicy
+
+    policy = PhonePolicy(event_rules=[
+        EventRule(package="com.tencent.mm", event_type="notification",
+                  conversation_type="group", body_regex=re.compile(r"@ExampleBot\b", re.I),
+                  behavior="auto", instruction_source=True, priority=2),
+        EventRule(package="com.tencent.mm", event_type="notification",
+                  conversation_type="group", behavior="ignore", priority=1),
+    ])
+    baseline = capture_exit_inbox_baseline(capture())
+    messages = find_exit_inbox_messages(baseline, capture(
+        message(1, "plain group message", 700),
+        message(2, "@ExampleBot please check", 900),
+    ), conversation_type="group")
+    decisions = [policy.evaluate_event(package="com.tencent.mm", event_type="notification",
+                                       title="Example Group", body=item["text"],
+                                       conversation_type="group") for item in messages]
+    assert [item["text"] for item, decision in zip(messages, decisions)
+            if decision.is_auto and decision.instruction_source] == ["@ExampleBot please check"]
+
+
 def test_exit_inbox_fails_closed_without_direction_or_known_conversation_type():
     baseline = capture_exit_inbox_baseline(capture())
     unknown_side = UIElement(index=1, class_name="host.ocr.Text", text="hello",
@@ -60,6 +84,11 @@ def test_exit_inbox_callback_reenters_the_normal_phone_event_policy(monkeypatch)
 
     received = []
     adapter = object.__new__(PhoneEventAdapter)
+    adapter._target_thread_id = ""
+    adapter._target_chat_type = "private"
+    adapter._target_chat_id = "123456789"
+    adapter._target_user_name = "Example"
+    adapter._target_user_id = "123456789"
     adapter._on_raw_event = lambda event: received.append(event)
     adapter._register_exit_inbox_callback()
     try:

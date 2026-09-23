@@ -598,7 +598,7 @@ def _durable_wechat_reply(backend, args, identity: str) -> str:
         'quote_text', 'quote_sender', 'quote_context',
     )], ensure_ascii=False) if args.get('quote_text') else ''
     with journal.receipt(identity, _resolve_android_serial() or "default", chat,
-                         text + quote_identity) as receipt:
+                         text, quote_identity) as receipt:
         state = receipt.state
         if state != "prepared":
             return json.dumps({

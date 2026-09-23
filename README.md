@@ -186,7 +186,7 @@ For an authenticated automatic WeChat reply, the workflow snapshots confirmed
 incoming bubbles when it enters the chat and scans once more immediately before
 returning Home. Newly visible private messages are deferred through the normal
 event-policy queue. In groups, only a new left-side message containing
-`@Void_DRSAI` is eligible. Unknown direction/type, quote-like `sender:`
+the configured `@YourBot` trigger is eligible. Unknown direction/type, quote-like `sender:`
 summaries and unclassified OCR are ignored rather than guessed. This is a
 foreground-notification backstop, not a history sync; device-layout validation
 is still required before relying on it for a production inbox.

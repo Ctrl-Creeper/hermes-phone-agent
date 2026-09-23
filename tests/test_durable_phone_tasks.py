@@ -1,7 +1,6 @@
 """Task lifetime and disk receipts, without contacting a device or Telegram."""
 import asyncio
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -55,6 +54,31 @@ with DeliveryJournal(Path(sys.argv[1])).receipt('event-1', 'test-device', 'Examp
     assert payload["meta"]["delivery_status"] == ("confirmed" if confirmed else "uncertain")
 
 
+def test_durable_reply_distinguishes_quoted_originals(monkeypatch):
+    calls = []
+
+    def send(_backend, _chat, _text, *, on_delivery, **options):
+        calls.append(options["quote_text"])
+        on_delivery("attempted")
+        on_delivery("confirmed")
+        return ActionResult(ok=True, action="wechat_reply",
+                            meta={"delivery_attempted": True, "delivery_status": "confirmed"})
+
+    monkeypatch.setattr(tool, "reply_to_wechat", send)
+    decision = PolicyDecision(behavior="auto", instruction_source=True,
+                              delivery_identity="same-notification")
+    with bind_event_policy(decision):
+        for index, quote in enumerate(("first original", "second original", "first original")):
+            turn_id = f"quote-turn-{index}"
+            response = json.loads(tool.handle_phone_use({
+                "action": "wechat_reply", "chat": "Example", "text": "same answer",
+                "quote_text": quote,
+            }, task_id=turn_id))
+            tool._finish_turn(turn_id, "")
+            assert response["ok"]
+    assert calls == ["first original", "second original"]
+
+
 def test_pre_send_failure_can_retry_but_confirmed_send_survives_turn_cleanup(monkeypatch):
     calls = []
 
@@ -81,7 +105,7 @@ def test_pre_send_failure_can_retry_but_confirmed_send_survives_turn_cleanup(mon
 def test_exception_after_send_boundary_does_not_restart_wechat_flow(monkeypatch):
     attempts = []
 
-    def attempt(_backend, _chat, _text, on_delivery):
+    def attempt(_backend, _chat, _text, *, on_delivery, **_options):
         attempts.append(1)
         on_delivery("attempted")
         raise RuntimeError("connection lost after send")

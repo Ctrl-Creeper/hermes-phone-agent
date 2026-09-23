@@ -212,7 +212,8 @@ def test_phone_tool_preserves_image_results_and_allows_next_read(vision_fixture,
     monkeypatch.setattr(tool, '_backend', phone)
     monkeypatch.setattr(tool, '_approval_callback', lambda *args: 'approve_once')
     response = tool.handle_phone_use({'action': 'wechat_collect_context', 'chat': 'Example',
-                                     'max_pages': 2, 'max_images': 1}, task_id='image-test')
+                                     'max_pages': 2, 'max_images': 1,
+                                     'include_images': True, 'open_images': True}, task_id='image-test')
     payload = json.loads(response['text_summary'])
     assert payload['ok'] and payload['chat_restored']
     assert payload['image_analysis'][0]['text'] == ['PHONE IMAGE TEST 42']
@@ -262,7 +263,8 @@ def test_failed_image_workflow_does_not_send_home_to_another_app(monkeypatch, tm
     }, **context))
     assert started['ok']
     result = json.loads(tool.handle_phone_use({
-        'action': 'wechat_collect_context', 'chat': 'Example', 'max_pages': 1, 'max_images': 1,
+        'action': 'wechat_collect_context', 'chat': 'Example', 'max_pages': 1,
+        'max_images': 1, 'include_images': True, 'open_images': True,
     }, **context))
     assert not result['ok'] and result['chat_restored'] is False
     assert phone.gestures == ['tap']

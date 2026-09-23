@@ -3533,7 +3533,7 @@ def test_group_wechat_policy_requires_exact_void_dr_sai_mention():
                     "package": "com.tencent.mm",
                     "event": "notification",
                     "conversation_type": "group",
-                    "body_regex": r"(?i)@void_drsai(?![a-z0-9_])",
+                    "body_regex": r"(?i)@yourbot(?![a-z0-9_])",
                 },
                 "behavior": "auto",
                 "instruction_source": True,
@@ -3563,7 +3563,7 @@ def test_group_wechat_policy_requires_exact_void_dr_sai_mention():
 
     mentioned = policy.evaluate_event(
         package="com.tencent.mm", event_type="notification",
-        title="项目群", body="Alice: @Void_DRSAI 你好", conversation_type="group",
+        title="项目群", body="Alice: @YourBot 你好", conversation_type="group",
     )
     unmentioned = policy.evaluate_event(
         package="com.tencent.mm", event_type="notification",
@@ -3571,7 +3571,7 @@ def test_group_wechat_policy_requires_exact_void_dr_sai_mention():
     )
     old_trigger = policy.evaluate_event(
         package="com.tencent.mm", event_type="notification",
-        title="项目群", body="Alice: @Void_DRS 你好", conversation_type="group",
+        title="项目群", body="Alice: @YourBo 你好", conversation_type="group",
     )
     private = policy.evaluate_event(
         package="com.tencent.mm", event_type="notification",
@@ -3940,12 +3940,12 @@ def test_auto_wechat_event_without_unique_conversation_identity_is_report_only(
         event_type="notification",
         package="com.tencent.mm",
         title=title,
-        body="Alice: @Void_DRSAI hello",
+        body="Alice: @YourBot hello",
         meta={"_transport": "helper_socket"},
     ))
 
     assert len(reports) == 1
-    assert "Alice: @Void_DRSAI hello" in reports[0]
+    assert "Alice: @YourBot hello" in reports[0]
 
 
 def test_wechat_friend_request_recognizes_real_notification_format():

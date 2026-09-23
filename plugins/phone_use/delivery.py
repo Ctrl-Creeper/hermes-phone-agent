@@ -44,11 +44,13 @@ class DeliveryJournal:
             db.close()
 
     @contextmanager
-    def receipt(self, identity: str, device: str, chat: str, text: str):
+    def receipt(self, identity: str, device: str, chat: str, text: str,
+                quote_identity: str = ""):
         import fcntl
-        key = hashlib.sha256(json.dumps(
-            [identity, device, chat.strip(), text], ensure_ascii=False,
-        ).encode()).hexdigest()
+        parts = [identity, device, chat.strip(), text]
+        if quote_identity:
+            parts.append(quote_identity)
+        key = hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
         # One journal-wide lock bounds filesystem growth and serializes crash
         # recovery. Phone operations are already serialized by the device queue.
         fd = os.open(self.directory / "writer.lock", os.O_CREAT | os.O_RDWR, 0o600)

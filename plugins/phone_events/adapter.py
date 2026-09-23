@@ -22,7 +22,8 @@ import subprocess
 import threading
 import time
 import unicodedata
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import replace
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -95,6 +96,9 @@ _FRIEND_REQUEST_BODIES = frozenset({
     "申请添加你为好友",
 })
 _AMBIGUOUS_WECHAT_TITLES = frozenset({"wechat", "微信", "group chat", "群聊"})
+_report_origin: ContextVar[Optional[tuple[str, str]]] = ContextVar(
+    "phone_report_origin", default=None,
+)
 
 
 def _resolve_adb_serial(serial: Optional[str] = None) -> str:
@@ -346,8 +350,47 @@ def _return_phone_home() -> None:
     return_phone_home()
 
 
+@contextmanager
+def _bind_report_origin(phone_event: Any, decision: Any):
+    origin = None
+    if (
+        phone_event is not None
+        and decision is not None
+        and decision.is_auto
+        and decision.instruction_source
+        and phone_event.event_type == "notification"
+        and phone_event.package == _WECHAT_PACKAGE
+    ):
+        meta = phone_event.meta or {}
+        title = _normalized_conversation_title(
+            meta.get("conversation_title") or phone_event.title
+        )
+        question = " ".join(str(phone_event.body or "").split())
+        if title and question:
+            kind = {
+                "group": "微信群聊",
+                "private": "微信私聊",
+            }.get(meta.get("conversation_type"), "微信聊天")
+            origin = (f"{kind}「{title}」", question)
+    token = _report_origin.set(origin)
+    try:
+        yield
+    finally:
+        _report_origin.reset(token)
+
+
+def _prepend_phone_report_context(response_text: str, platform: str = "", **_kwargs):
+    """Label only the final Telegram response to an automatic WeChat task."""
+    origin = _report_origin.get()
+    if platform != "telegram" or origin is None or not response_text:
+        return None
+    chat, question = origin
+    return f"聊天：{chat}\n原问题：{question}\n\n{response_text}"
+
+
 async def _dispatch_with_event_policy(
     telegram_adapter, message, decision, persona_prompt: str = "",
+    phone_event: Any = None,
 ) -> None:
     """Dispatch one synthetic Telegram turn with a turn-local phone policy."""
     existing_prompt = (getattr(message, "channel_prompt", None) or "").strip()
@@ -376,13 +419,13 @@ async def _dispatch_with_event_policy(
         lock = locks.setdefault(key, asyncio.Lock())
         async with lock:
             await _wait_phone_session(telegram_adapter, key)
-            with _event_policy_scope(decision):
+            with _event_policy_scope(decision), _bind_report_origin(phone_event, decision):
                 await telegram_adapter.handle_message(message)
                 await _wait_phone_session(telegram_adapter, key)
         return
 
     # Synchronous adapters (including older integrations) finish on return.
-    with _event_policy_scope(decision):
+    with _event_policy_scope(decision), _bind_report_origin(phone_event, decision):
         try:
             await telegram_adapter.handle_message(message)
         finally:
@@ -858,6 +901,7 @@ class PhoneEventAdapter:
                 message,
                 decision,
                 getattr(self, "_persona_prompt", ""),
+                phone_event,
             ),
             loop,
         )

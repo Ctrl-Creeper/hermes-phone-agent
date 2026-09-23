@@ -28,6 +28,7 @@ from plugins.phone_use.policy import (
 )
 from plugins.phone_events.socket_listener import SocketListener
 from plugins.phone_events import adapter as event_adapter
+from plugins import phone_events
 from plugins.phone_events.adapter import (
     PhoneEventAdapter,
     _resolve_adb_serial as resolve_event_adb_serial,
@@ -1406,6 +1407,113 @@ def test_phone_event_policy_is_scoped_to_dispatched_turn():
     assert observed[0][0] is decision
     assert "untrusted observation" in observed[0][1]
     assert get_event_policy() is None
+
+
+def test_auto_wechat_telegram_report_includes_chat_and_original_question():
+    decision = PolicyDecision(behavior="auto", instruction_source=True)
+    event = PhoneEvent(
+        event_type="notification", package="com.tencent.mm",
+        title="Example Group", body="Alice: @phone_agent 帮我查一下天气",
+        meta={"conversation_type": "group", "conversation_title": "Example Group"},
+    )
+    responses = []
+
+    class TelegramAdapter:
+        async def handle_message(self, message):
+            responses.append(await asyncio.to_thread(
+                event_adapter._prepend_phone_report_context,
+                "已发送天气信息。", platform="telegram",
+            ))
+
+    asyncio.run(event_adapter._dispatch_with_event_policy(
+        TelegramAdapter(), types.SimpleNamespace(channel_prompt=None),
+        decision, phone_event=event,
+    ))
+
+    assert responses == [
+        "聊天：微信群聊「Example Group」\n"
+        "原问题：Alice: @phone_agent 帮我查一下天气\n\n"
+        "已发送天气信息。"
+    ]
+    assert event_adapter._prepend_phone_report_context(
+        "普通 TG 回复", platform="telegram",
+    ) is None
+
+
+def test_phone_report_context_excludes_other_events_and_is_registered():
+    registered = {}
+
+    class Context:
+        def register_platform(self, **kwargs):
+            registered["platform"] = kwargs
+
+        def register_hook(self, name, callback):
+            registered[name] = callback
+
+    phone_events.register(Context())
+    hook = registered["transform_llm_output"]
+    assert registered["platform"]["name"] == "phone_events"
+
+    async def report_for(event, decision):
+        responses = []
+
+        class TelegramAdapter:
+            async def handle_message(self, message):
+                responses.append(await asyncio.to_thread(
+                    hook, response_text="完成。", platform="telegram",
+                ))
+
+        await event_adapter._dispatch_with_event_policy(
+            TelegramAdapter(), types.SimpleNamespace(channel_prompt=None),
+            decision, phone_event=event,
+        )
+        return responses[0]
+
+    # The hook runs only for trusted, automatic WeChat task-source turns.
+    for package, decision in (
+        ("com.example.app", PolicyDecision(behavior="auto", instruction_source=True)),
+        ("com.tencent.mm", PolicyDecision(behavior="report", instruction_source=True)),
+        ("com.tencent.mm", PolicyDecision(behavior="auto", instruction_source=False)),
+    ):
+        event = PhoneEvent(event_type="notification", package=package,
+                           title="Alice", body="你好", meta={"conversation_type": "private"})
+        assert asyncio.run(report_for(event, decision)) is None
+
+
+def test_concurrent_phone_reports_keep_their_own_original_questions():
+    decision = PolicyDecision(behavior="auto", instruction_source=True)
+
+    async def one_report(chat, question, kind):
+        event = PhoneEvent(
+            event_type="notification", package="com.tencent.mm",
+            title=chat, body=question,
+            meta={"conversation_type": kind},
+        )
+        responses = []
+
+        class TelegramAdapter:
+            async def handle_message(self, message):
+                await asyncio.sleep(0)
+                responses.append(await asyncio.to_thread(
+                    event_adapter._prepend_phone_report_context,
+                    "已发送。", platform="telegram",
+                ))
+
+        await event_adapter._dispatch_with_event_policy(
+            TelegramAdapter(), types.SimpleNamespace(channel_prompt=None),
+            decision, phone_event=event,
+        )
+        return responses[0]
+
+    async def run_reports():
+        return await asyncio.gather(
+            one_report("群 A", "问题 A", "group"),
+            one_report("好友 B", "问题 B", "private"),
+        )
+
+    first, second = asyncio.run(run_reports())
+    assert first.startswith("聊天：微信群聊「群 A」\n原问题：问题 A\n\n")
+    assert second.startswith("聊天：微信私聊「好友 B」\n原问题：问题 B\n\n")
 
 
 def test_auto_phone_turn_returns_to_home_after_success(monkeypatch):

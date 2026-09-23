@@ -152,6 +152,8 @@ These guarantees concern the collection call. The phone-events adapter retains
 its separate end-of-turn Home cleanup policy; that gateway lifecycle is not an
 exclusive device-ownership mechanism for concurrent human/other-host use.
 
+Experimental [attachment sending](ATTACHMENTS.md) adds checksum-bound file/original-image delivery through the File picker; device validation is pending.
+
 `phone_use` includes composite actions for opening a conversation, collecting
 recent context, and replying. Conversation titles are found through WeChat
 search and verified after navigation, so workflows do not depend on a fixed

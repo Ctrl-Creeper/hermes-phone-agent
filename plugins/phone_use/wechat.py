@@ -1434,6 +1434,62 @@ def reply(backend: PhoneBackend, chat: str, text: str, *, quote_text: str = '',
         _clear_symbol_chat_hint(chat)
 
 
+def send_attachment(backend: PhoneBackend, chat: str, path: str, sha256: str) -> ActionResult:
+    """Send one staged file only from a verifiable recipient/file summary."""
+    result = ActionResult(ok=False, action='wechat_send_attachment')
+    attempted = False
+    try:
+        opened = open_chat(backend, chat)
+        if not opened.ok or opened.capture is None:
+            result.message = opened.message
+            return result
+        resolved_chat = opened.meta.get('resolved_chat', chat)
+        staged = backend.stage_attachment(path, sha256)
+        result.meta['attachment'] = staged
+        # Exact filename avoids selecting another equally named original file.
+        stages = [({'更多功能', '更多', 'More', 'Attach'}, 'attachment_menu'),
+                  ({'文件', 'File'}, 'file_picker'),
+                  ({'手机存储', 'Phone storage'}, 'phone_storage'),
+                  ({'Download', 'Downloads', '下载'}, 'downloads'),
+                  ({staged['name']}, 'attachment')]
+        current = backend.capture(mode='hierarchy')
+        for labels, stage in stages:
+            if current.current_package != WECHAT_PACKAGE:
+                result.message = 'Unexpected app in attachment picker'
+                return result
+            matches = [e for e in current.elements if e.enabled and _label(e) in labels]
+            if len(matches) != 1:
+                result.message = f'Unsupported or ambiguous {stage}; no send attempted'
+                return result
+            tapped = _run_and_capture(backend, 'tap', lambda: backend.tap(element=matches[0].index))
+            if not tapped.ok or tapped.capture is None:
+                result.message = f'Could not open {stage}'
+                return result
+            current = tapped.capture
+        labels = {_label(e) for e in current.elements if e.enabled}
+        recipients = {f'发送给：{resolved_chat}', f'发送给: {resolved_chat}', f'Send to: {resolved_chat}'}
+        buttons = [e for e in current.elements if e.enabled and _label(e) in {'发送', 'Send'}]
+        if (current.current_package != WECHAT_PACKAGE or not labels.intersection(recipients)
+                or staged['name'] not in labels or len(buttons) != 1):
+            result.message = 'Recipient/file confirmation unverified; no send attempted'
+            return result
+        attempted = True  # Set before injection, including exceptions/capture failures.
+        backend.tap(element=buttons[0].index)
+        result.message = 'Attachment send attempted; verify delivery before any repeat'
+        # A filename visible in chat does not establish completed upload/delivery.
+        return result
+    except Exception as exc:
+        result.message = f'Attachment workflow failed: {exc}'
+        return result
+    finally:
+        result.meta.update(delivery_attempted=attempted,
+                           delivery_status='uncertain' if attempted else 'not_attempted')
+        try:
+            backend.keyevent('HOME')
+        except Exception:
+            result.meta['home_cleanup_failed'] = True
+
+
 def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult:
     """Accept one named WeChat friend request and always return Home."""
     requester = requester.strip()

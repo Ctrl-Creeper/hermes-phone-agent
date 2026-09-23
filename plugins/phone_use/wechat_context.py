@@ -290,7 +290,7 @@ def collect_context(
         )
         signature = (tuple(page_lines), position_markers, image_markers)
         pages += 1
-        seeking_first_image = open_images and max_images > 0 and opened_images == 0
+        seeking_first_image = include_images and open_images and max_images > 0 and opened_images == 0
         if signature in signatures:
             # WeChat may need longer than the normal post-swipe delay to load
             # older records. During image discovery tolerate one stale frame;

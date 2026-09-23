@@ -22,7 +22,7 @@ from .backend import (
     PhoneBackend,
     UIElement,
 )
-from .policy import bind_event_policy, get_event_policy, get_policy
+from .policy import bind_event_policy as bind_event_policy, get_event_policy, get_policy
 from .wechat import open_chat as open_wechat_chat
 from .wechat import reply as reply_to_wechat
 from .wechat import accept_friend_request as accept_wechat_friend_request
@@ -772,15 +772,17 @@ def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
         return _text_response(res)
 
     if action == "wechat_collect_context":
+        include_images = args.get("include_images", args.get("open_images", False)) is True
+        open_images = include_images and args.get("open_images", False) is True
         res = collect_wechat_context(
             backend,
             args.get("chat", ""),
             scope=args.get("scope", ""),
             max_messages=int(args.get("max_messages", 50)),
-            max_pages=int(args.get("max_pages", 8)),
+            max_pages=int(args.get("max_pages", 8 if args.get("scope") or open_images else 1)),
             max_minutes=int(args.get("max_minutes", 10)),
-            include_images=args.get("include_images", True) is not False,
-            open_images=args.get("open_images", True) is not False,
+            include_images=include_images,
+            open_images=open_images,
             max_images=int(args.get("max_images", 3)),
         )
         payload = dict(res.meta)

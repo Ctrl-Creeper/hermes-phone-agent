@@ -34,6 +34,17 @@ def add_semantic_regions(
     if package != "com.tencent.mm" or not elements or width <= 0 or height <= 0:
         return elements
 
+    # Host OCR does not retain Android's bubble hierarchy. Mark only clearly
+    # side-aligned text; exit-inbox scanning ignores unclassified text.
+    for element in elements:
+        if element.class_name != "host.ocr.Text":
+            continue
+        left, _top, right, _bottom = element.bounds
+        if left <= int(width * .46) and right <= int(width * .88):
+            element.attributes["message_direction"] = "incoming"
+        elif left >= int(width * .45):
+            element.attributes["message_direction"] = "outgoing"
+
     title_limit = max(220, int(height * 0.1))
     title_candidates = [
         element

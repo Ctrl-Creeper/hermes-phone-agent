@@ -502,6 +502,44 @@ class PhoneEventAdapter:
             or str(assume_muted_groups).strip().casefold() in {"true", "1", "yes"}
         )
 
+    def _register_exit_inbox_callback(self) -> None:
+        """Route the last foreground scan through the normal policy pipeline."""
+        try:
+            from hermes_plugins.phone_use.wechat import set_exit_inbox_callback
+        except ImportError:
+            try:
+                from plugins.phone_use.wechat import set_exit_inbox_callback
+            except ImportError:
+                logger.warning("phone_use plugin unavailable; exit inbox scan disabled")
+                return
+
+        def dispatch(chat: str, conversation_type: str, messages: list[dict]) -> None:
+            from .event_filter import PhoneEvent
+            for item in messages:
+                body = str(item.get("text") or "").strip()
+                if not body:
+                    continue
+                # This callback is installed only in the authenticated local
+                # adapter. Its text is still untrusted and passes normal policy
+                # evaluation before it can become a task.
+                self._on_raw_event(PhoneEvent(
+                    event_type="notification",
+                    package=_WECHAT_PACKAGE,
+                    title=chat,
+                    body=body,
+                    timestamp=time.time(),
+                    meta={
+                        "conversation_title": chat,
+                        "conversation_type": conversation_type,
+                        "conversation_key": hashlib.sha256(
+                            f"exit-inbox:{conversation_type}:{chat}".encode("utf-8")
+                        ).hexdigest()[:20],
+                        "_transport": "exit_inbox",
+                    },
+                ))
+
+        set_exit_inbox_callback(dispatch)
+
     def set_message_callback(self, callback) -> None:
         """Set the callback for injecting events into the gateway."""
         self._message_callback = callback
@@ -535,6 +573,7 @@ class PhoneEventAdapter:
             return False
 
         self._event_filter = EventFilter.from_env()
+        self._register_exit_inbox_callback()
 
         configured_serial = (
             self._serial
@@ -615,7 +654,7 @@ class PhoneEventAdapter:
             )
             if (
                 decision.is_auto
-                and event.meta.get("_transport") != "helper_socket"
+                and event.meta.get("_transport") not in {"helper_socket", "exit_inbox"}
             ):
                 decision = replace(
                     decision,
@@ -848,7 +887,7 @@ class PhoneEventAdapter:
             # instead of being dropped by Telegram's sender authorization.
             role_authorized=(
                 (getattr(phone_event, "meta", {}) or {}).get("_transport")
-                == "helper_socket"
+                in {"helper_socket", "exit_inbox"}
             ),
         )
 

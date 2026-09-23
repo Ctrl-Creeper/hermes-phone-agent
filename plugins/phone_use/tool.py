@@ -520,13 +520,18 @@ def _dispatch_under_device_lock(backend, action, args, task_id, session_id,
 
     try:
         if trusted_auto_wechat_reply:
-            cached = _cached_reply_result(task_id, session_id, args.get("chat", ""), args.get("text", ""))
+            quote_identity = json.dumps([args.get(key, '') for key in (
+                'quote_text', 'quote_sender', 'quote_context',
+            )], ensure_ascii=False) if args.get('quote_text') else ''
+            cached = _cached_reply_result(task_id, session_id, args.get("chat", ""),
+                                          args.get("text", ""), quote_identity)
             if cached is not None:
                 return cached
             decision = get_event_policy()
             if decision.delivery_identity:
-                return _durable_wechat_reply(backend, args, decision.delivery_identity)
-            result = _dispatch(backend, action, args)
+                result = _durable_wechat_reply(backend, args, decision.delivery_identity)
+            else:
+                result = _dispatch(backend, action, args)
         else:
             result = _dispatch(backend, action, args)
     except Exception as e:
@@ -534,6 +539,9 @@ def _dispatch_under_device_lock(backend, action, args, task_id, session_id,
         result = _error_response_with_capture(backend, action, f"{action} failed: {e}")
 
     if trusted_auto_wechat_reply:
+        quote_identity = json.dumps([args.get(key, '') for key in (
+            'quote_text', 'quote_sender', 'quote_context',
+        )], ensure_ascii=False) if args.get('quote_text') else ''
         _remember_reply_result(
             task_id,
             session_id,
@@ -552,7 +560,19 @@ def _durable_wechat_reply(backend, args, identity: str) -> str:
     if not isinstance(chat, str) or not chat.strip() or not isinstance(text, str) or not text.strip():
         return json.dumps({"ok": False, "error": "wechat_reply requires chat and text"})
     journal = DeliveryJournal(state_directory())
-    with journal.receipt(identity, _resolve_android_serial() or "default", chat, text) as receipt:
+    quote_options = {key: args[key] for key in (
+        'quote_text', 'quote_sender', 'quote_context', 'quote_max_pages',
+    ) if key in args}
+    event_policy = get_event_policy()
+    if (event_policy is not None and event_policy.is_auto
+            and event_policy.instruction_source
+            and event_policy.conversation_type in {'group', 'private'}):
+        quote_options['exit_inbox_conversation_type'] = event_policy.conversation_type
+    quote_identity = json.dumps([args.get(key, '') for key in (
+        'quote_text', 'quote_sender', 'quote_context',
+    )], ensure_ascii=False) if args.get('quote_text') else ''
+    with journal.receipt(identity, _resolve_android_serial() or "default", chat,
+                         text + quote_identity) as receipt:
         state = receipt.state
         if state != "prepared":
             return json.dumps({
@@ -564,7 +584,8 @@ def _durable_wechat_reply(backend, args, identity: str) -> str:
             })
         receipt.record("prepared")
         try:
-            result = reply_to_wechat(backend, chat, text, on_delivery=receipt.record)
+            result = reply_to_wechat(backend, chat, text, on_delivery=receipt.record,
+                                     **quote_options)
         except Exception as exc:
             state = receipt.state
             if state == "prepared":
@@ -843,6 +864,13 @@ def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
         quote_options = {key: args[key] for key in (
             'quote_text', 'quote_sender', 'quote_context', 'quote_max_pages',
         ) if key in args}
+        event_policy = get_event_policy()
+        conversation_type = ""
+        if (event_policy is not None and event_policy.is_auto
+                and event_policy.instruction_source):
+            conversation_type = event_policy.conversation_type
+        if conversation_type:
+            quote_options['exit_inbox_conversation_type'] = conversation_type
         res = reply_to_wechat(backend, chat, text, **quote_options)
         logger.info(
             "wechat_reply outcome: ok=%s chat=%r detail=%s",

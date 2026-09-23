@@ -84,6 +84,7 @@ class PolicyDecision:
     source: str = "default"
     # Set by the authenticated event adapter, never by model arguments.
     delivery_identity: str = ""
+    conversation_type: str = ""
 
     @property
     def is_auto(self) -> bool:
@@ -169,6 +170,7 @@ class PhonePolicy:
                     instruction_source=rule.instruction_source,
                     notes=rule.notes,
                     source=f"event_rule(pkg={rule.package!r}, event={rule.event_type!r}, p={rule.priority})",
+                    conversation_type=conversation_type,
                 )
 
         # Tier 2: app_profiles (package-based)
@@ -180,12 +182,14 @@ class PhonePolicy:
                 allowed_actions=profile.allowed_actions,
                 notes=profile.notes,
                 source=f"app_profile({profile.name!r})",
+                conversation_type=conversation_type,
             )
 
         # Tier 3: default
         return PolicyDecision(
             behavior=self.default_behavior,
             source="default",
+            conversation_type=conversation_type,
         )
 
     def requires_approval(self, action: str) -> bool:

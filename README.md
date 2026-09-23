@@ -125,9 +125,22 @@ accept the named requester without setting a remark, or `/deny` to ignore it.
 The approval wait does not hold the phone-operation queue, so ordinary phone
 tasks continue while the request is pending.
 
+The friend workflow recognizes both the fixed New Friends entry and its dynamic
+request preview under Recommended. It supports Accept or View → Confirm Friend
+Request → Done without changing aliases or permissions. Success requires the
+named request's Added status; an unknown result is not retried automatically.
+Only uniquely identified, visible requests are handled; ambiguous or off-screen
+requests are reported for inspection. Final acceptance is not exercised by the
+offline tests or navigation-only device checks.
+
 The hybrid backend uses ADB for fast operations (screenshot, tap, swipe, keyevent, app management) and only starts Appium lazily when it needs Unicode text input or when ADB's `uiautomator dump` fails. If Appium is not installed, it falls back to pure ADB automatically.
 
 ## Using Without Hermes
+
+The shared phone stack also powers the
+[Neko phone_workflows plugin](https://github.com/Ctrl-Creeper/n.e.k.o_plugin_phone_workflows).
+For maintainers and coding agents, [DOWNSTREAMS.md](DOWNSTREAMS.md) describes both
+downstreams, helper APK identity, sync mechanisms and compatibility checks.
 
 To use phone control from Claude, Codex, GPT, Gemini, or any other agent framework (without Hermes), see the standalone [phone-mcp-server](https://github.com/Ctrl-Creeper/phone-mcp-server) repo. It provides MCP and HTTP servers with the same backend and security model.
 

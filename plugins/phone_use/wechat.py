@@ -37,6 +37,9 @@ _CONVERSATION_TAB_LABELS = frozenset({"wechat", "微信", "chats", "聊天"})
 _NEW_FRIENDS_LABELS = frozenset({"new friends", "新的朋友"})
 _ACCEPT_LABELS = frozenset({"accept", "接受", "添加"})
 _ADDED_LABELS = frozenset({"added", "accepted", "已添加", "已通过"})
+_VIEW_REQUEST_LABELS = frozenset({"view", "查看"})
+_CONFIRM_REQUEST_LABELS = frozenset({"confirm friend request", "通过朋友验证", "朋友验证"})
+_DONE_LABELS = frozenset({"done", "完成"})
 _SYMBOL_CHAT_HINT_TTL_SECONDS = 120.0
 _symbol_chat_hint: Optional[tuple[str, str, float]] = None
 _EMOJI_PLACEHOLDER = re.compile(r"\[(?:emoji|sticker|表情)\]", re.IGNORECASE)
@@ -364,13 +367,62 @@ def _find_row_action(
     candidates = [
         element for element in capture.elements
         if _label(element).casefold() in labels
-        and abs(element.center()[1] - row_y) <= 140
+        and element.enabled
+        and element.center()[0] >= capture.width * 0.7
+        and row.bounds[1] - capture.height * 0.015
+        <= element.center()[1] <= row.bounds[3] + capture.height * 0.015
     ]
     return min(
         candidates,
         key=lambda element: abs(element.center()[1] - row_y),
         default=None,
     )
+
+
+def _friend_request_row(capture: CaptureResult, requester: str) -> Optional[UIElement]:
+    # Approval applies to one exact person, not the fuzzy chat-search match.
+    # Preserve punctuation and reject duplicate names instead of choosing first.
+    def normalize(value: str) -> str:
+        return re.sub(r"\s+", "", value).casefold()
+    matches = [e for e in capture.elements
+               if normalize(_label(e)) == normalize(requester)
+               and capture.height * 0.12 < e.center()[1] < capture.height * 0.9
+               and e.center()[0] < capture.width * 0.7]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _friend_page(capture: CaptureResult, labels: frozenset[str]) -> bool:
+    return capture.current_package == WECHAT_PACKAGE and any(
+        _label(e).casefold() in labels and e.bounds[3] < capture.height * 0.1
+        and capture.width * 0.2 <= e.center()[0] <= capture.width * 0.8
+        for e in capture.elements
+    )
+
+
+def _new_friends_entry(capture: CaptureResult) -> Optional[UIElement]:
+    entry = _find_label(capture, _NEW_FRIENDS_LABELS)
+    if entry is not None:
+        return entry
+    if not _friend_page(capture, _CONTACT_LABELS):
+        return None
+    recommended = _find_label(capture, frozenset({"recommended", "推荐"}))
+    groups = _find_label(capture, frozenset({"group chats", "群聊"}))
+    if recommended is None or groups is None:
+        return None
+    # WeChat replaces the New Friends label with the latest request preview.
+    # Only this bounded section is a navigation entry, never an ordinary contact.
+    candidates = [e for e in capture.elements
+                  if e.enabled and _label(e)
+                  and recommended.bounds[3] < e.bounds[1] < groups.bounds[1]
+                  and capture.width * 0.12 < e.bounds[0] < capture.width * 0.5]
+    return min(candidates, key=lambda e: e.bounds[1], default=None)
+
+
+def _friend_added(capture: CaptureResult, requester: str) -> bool:
+    row = _friend_request_row(capture, requester)
+    return (_friend_page(capture, _NEW_FRIENDS_LABELS)
+            and row is not None
+            and _find_row_action(capture, row, _ADDED_LABELS) is not None)
 
 
 def _find_top_hit(capture: CaptureResult) -> Optional[UIElement]:
@@ -1094,11 +1146,21 @@ def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult
             return result
         current = launched.capture
 
-        request_row = _find_text(current.elements, requester)
+        request_row = _friend_request_row(current, requester)
+        request_actions = _ACCEPT_LABELS | _VIEW_REQUEST_LABELS
         accept = (
-            _find_row_action(current, request_row, _ACCEPT_LABELS)
-            if request_row is not None else None
+            _find_row_action(current, request_row, request_actions)
+            if request_row is not None and _friend_page(current, _NEW_FRIENDS_LABELS)
+            else None
         )
+        if _friend_added(current, requester):
+            result.ok = True
+            result.message = "WeChat requester is already added"
+            return result
+        if _friend_page(current, _NEW_FRIENDS_LABELS) and accept is None:
+            result.message = "Unique requester and Accept/View button were not found"
+            result.meta["stage"] = "request_list"
+            return result
         if accept is None:
             contacts = _find_label(
                 current,
@@ -1136,11 +1198,12 @@ def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult
             current = _settle_capture(
                 backend,
                 opened_contacts.capture,
-                lambda capture: _find_label(capture, _NEW_FRIENDS_LABELS) is not None,
+                lambda capture: _new_friends_entry(capture) is not None,
             )
-            new_friends = _find_label(current, _NEW_FRIENDS_LABELS)
+            new_friends = _new_friends_entry(current)
             if new_friends is None:
                 result.message = "WeChat New Friends entry was not found"
+                result.meta["stage"] = "contacts"
                 result.capture = current
                 return result
 
@@ -1154,20 +1217,29 @@ def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult
             current = _settle_capture(
                 backend,
                 opened_requests.capture,
-                lambda capture: _find_text(capture.elements, requester) is not None,
+                lambda capture: _friend_page(capture, _NEW_FRIENDS_LABELS)
+                and _friend_request_row(capture, requester) is not None,
             )
-            request_row = _find_text(current.elements, requester)
-            if request_row is None:
-                result.message = f"friend request from {requester!r} was not found"
+            request_row = _friend_request_row(current, requester)
+            if request_row is None or not _friend_page(current, _NEW_FRIENDS_LABELS):
+                result.message = f"unique friend request from {requester!r} was not found"
+                result.meta["stage"] = "request_list"
                 result.capture = current
                 return result
-            accept = _find_row_action(current, request_row, _ACCEPT_LABELS)
+            if _friend_added(current, requester):
+                result.ok = True
+                result.message = "WeChat requester is already added"
+                return result
+            accept = _find_row_action(current, request_row, request_actions)
 
         if accept is None or request_row is None:
-            result.message = f"Accept button for {requester!r} was not found"
+            result.message = f"Accept/View button for {requester!r} was not found"
+            result.meta["stage"] = "request_list"
             result.capture = current
             return result
 
+        result.meta["stage"] = "open_request"
+        result.meta["acceptance_attempted"] = _label(accept).casefold() in _ACCEPT_LABELS
         accepted = _run_and_capture(
             backend, "tap", lambda: backend.tap(element=accept.index),
         )
@@ -1178,17 +1250,44 @@ def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult
         current = _settle_capture(
             backend,
             accepted.capture,
-            lambda capture: (
-                (row := _find_text(capture.elements, requester)) is not None
-                and (
-                    _find_row_action(capture, row, _ADDED_LABELS) is not None
-                    or _find_row_action(capture, row, _ACCEPT_LABELS) is None
-                )
-            ),
+            lambda capture: _friend_added(capture, requester)
+            or _friend_page(capture, _CONFIRM_REQUEST_LABELS),
         )
-        request_row = _find_text(current.elements, requester)
-        if request_row is None or _find_row_action(current, request_row, _ACCEPT_LABELS):
+        # Only enter confirmation after selecting the named request ourselves.
+        # Do not change alias, tags or permissions, and never repeat a submit.
+        if _friend_page(current, _CONFIRM_REQUEST_LABELS):
+            result.meta["stage"] = "confirmation"
+            current = _settle_capture(
+                backend, current,
+                lambda c: _find_label(c, _DONE_LABELS) is not None,
+            )
+            done_buttons = [e for e in current.elements
+                            if e.enabled and _label(e).casefold() in _DONE_LABELS]
+            if not _friend_page(current, _CONFIRM_REQUEST_LABELS) or len(done_buttons) != 1:
+                result.message = "WeChat friend confirmation Done button was not found uniquely"
+                result.capture = current
+                return result
+            result.meta["acceptance_attempted"] = True
+            confirmed = _run_and_capture(
+                backend, "tap", lambda: backend.tap(element=done_buttons[0].index),
+            )
+            if not confirmed.ok or confirmed.capture is None:
+                result.message = confirmed.message or "friend confirmation could not be observed"
+                result.capture = confirmed.capture
+                return result
+            current = _settle_capture(
+                backend, confirmed.capture, lambda c: _friend_added(c, requester),
+            )
+        # Some versions open a profile/chat after Done. Read the requests list
+        # once more via Back; absence of an Accept button is not proof of success.
+        if not _friend_added(current, requester) and not _friend_page(current, _NEW_FRIENDS_LABELS):
+            backed = _run_and_capture(backend, "keyevent", lambda: backend.keyevent("BACK"))
+            if backed.ok and backed.capture is not None:
+                current = _settle_capture(backend, backed.capture,
+                                          lambda c: _friend_added(c, requester))
+        if not _friend_added(current, requester):
             result.message = f"accepting friend request from {requester!r} could not be confirmed"
+            result.meta["stage"] = "verify_added"
             result.capture = current
             return result
 
@@ -1197,7 +1296,7 @@ def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult
             action="wechat_accept_friend",
             message=f"accepted WeChat friend request from {requester!r}",
             capture=current,
-            meta={"requester": requester},
+            meta={**result.meta, "stage": "confirmed"},
         )
         return result
     except Exception as exc:

@@ -95,6 +95,27 @@ you explicitly want verbatim notification title/body delivery.
 
 ## Deterministic WeChat Workflows
 
+Voice conversion waits for the same visible transcription on two consecutive
+captures. Changing partial text, a moved voice anchor, conversion failure or an
+unexpected app is not accepted as a transcript. The text is still a spatial
+observation below a voice bubble, not an audio-grounded accuracy guarantee;
+real-device validation remains pending.
+
+Voice messages can be included in `wechat_collect_context` with
+`transcribe_voice: true` and `max_voice: 3` (maximum 5 attempts). This uses
+WeChat's built-in **Convert to Text / 转文字** menu; it does not play, download or
+send audio. The returned `voice_transcripts` records contain observed text or a
+status such as `conversion_unavailable` / `unconfirmed`. The agent can interpret
+the text as conversation content, subject to the existing task policy.
+
+This is a bounded first implementation: it requires clearly labeled voice
+nodes in Android's accessibility tree. OCR duration labels alone are not enough.
+Transcription is read from newly visible text beneath the unchanged voice bubble
+and can contain recognition errors; it is not an audio-level verification.
+No detected bubbles does not mean no audio was present. Shared-core callers
+default to `transcribe_voice: false`; MCP and Neko wrappers need to explicitly
+expose/forward the option. No helper APK update is required.
+
 `phone_use` includes composite actions for opening a conversation, collecting
 recent context, and replying. Conversation titles are found through WeChat
 search and verified after navigation, so workflows do not depend on a fixed

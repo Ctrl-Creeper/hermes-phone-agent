@@ -960,7 +960,164 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
     )
 
 
-def _reply_once(backend: PhoneBackend, chat: str, text: str,
+def _quote_normalize(text: str) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFC", text)).casefold()
+
+
+def quote_message_candidates(capture: CaptureResult) -> list[dict]:
+    """Visible text anchors, not stable message IDs. Reacquire before acting."""
+    entry = _find_input(capture.elements)
+    limit = min(entry.bounds[1] if entry else capture.height, int(capture.height * .8))
+    candidates = []
+    for e in sorted(capture.elements, key=lambda item: (item.bounds[1], item.bounds[0])):
+        text = _label(e)
+        if (not text or not e.enabled or e.class_name == _MESSAGE_INPUT_CLASS
+                or 'EditText' in e.class_name or e.bounds[1] < capture.height * .12
+                or e.bounds[3] >= limit or e.bounds[2] <= e.bounds[0]
+                or re.fullmatch(r'\d{1,2}:\d{2}(?:\s*[AP]M)?', text, re.I)):
+            continue
+        sender = str(e.attributes.get('sender') or '')
+        candidates.append({'text': text, 'sender': sender, 'element': e.index,
+                           'bounds': list(e.bounds)})
+    # OCR wraps a single message into adjacent lines. Keep individual anchors
+    # too; merged candidates are only hypotheses until the quote preview agrees.
+    wrapped = []
+    for i, first in enumerate(candidates):
+        previous = first
+        text = first['text']
+        for following in candidates[i + 1:i + 6]:
+            gap = following['bounds'][1] - previous['bounds'][3]
+            if not (0 <= gap <= capture.height * .008
+                    and abs(following['bounds'][0] - first['bounds'][0]) < capture.width * .06
+                    and following['sender'] == first['sender']):
+                break
+            text += '\n' + following['text']
+            wrapped.append({**first, 'text': text,
+                            'bounds': [first['bounds'][0], first['bounds'][1],
+                                       max(first['bounds'][2], following['bounds'][2]), following['bounds'][3]]})
+            previous = following
+    return candidates + wrapped
+
+
+def _quote_score(observed: str, wanted: str) -> float:
+    a, b = _quote_normalize(observed), _quote_normalize(wanted)
+    if a == b:
+        return 1.0
+    if min(len(a), len(b)) < 12:
+        return 0.0
+    # A small edit in quantities or negation is a semantic change, not OCR noise.
+    critical = r"\d+(?:[.:]\d+)*|[零〇一二两三四五六七八九十百千万亿]+|不|没|无|非|别|未|勿|莫|否|\b(?:no|not|never|without|cannot)\b|n't"
+    if re.findall(critical, observed.casefold()) != re.findall(critical, wanted.casefold()):
+        return 0.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _quote_preview(capture: CaptureResult, original: str, sender: str) -> bool:
+    """Verify a full sender:text preview directly above the current composer."""
+    entry = _find_input(capture.elements)
+    if entry is None or capture.current_package != WECHAT_PACKAGE:
+        return False
+    elements = sorted((e for e in capture.elements
+                       if entry.bounds[1] - capture.height * .16 <= e.bounds[1]
+                       and e.bounds[3] <= entry.bounds[1]), key=lambda e: e.bounds[1])
+    for index, e in enumerate(elements):
+        parts = re.split(r'[:：]', _label(e), maxsplit=1)
+        if len(parts) != 2 or not parts[0].strip():
+            continue
+        if sender and _quote_normalize(parts[0]) != _quote_normalize(sender):
+            continue
+        body = parts[1]
+        if _quote_normalize(body) == _quote_normalize(original):
+            return True
+        previous = e
+        for continuation in elements[index + 1:index + 6]:
+            if not (0 <= continuation.bounds[1] - previous.bounds[3] <= capture.height * .008
+                    and abs(continuation.bounds[0] - e.bounds[0]) < capture.width * .06):
+                break
+            body += _label(continuation)
+            if _quote_normalize(body) == _quote_normalize(original):
+                return True
+            previous = continuation
+    return False
+
+
+def _prepare_quote(backend: PhoneBackend, current: CaptureResult, chat: str,
+                   original: str, sender: str, context: str, max_pages: int) -> ActionResult:
+    def failure(reason: str) -> ActionResult:
+        return ActionResult(ok=False, action='wechat_reply', message=reason,
+                            capture=current, meta={'quote_status': reason})
+
+    seen = set()
+    for page in range(max_pages):
+        # Refresh after navigation/scroll: element indices are frame-local.
+        current = backend.capture(mode='hierarchy')
+        if not _chat_is_open(current, chat) or current.current_package != WECHAT_PACKAGE:
+            return failure('quote_chat_changed')
+        candidates = quote_message_candidates(current)
+        matches = []
+        for item in candidates:
+            score = _quote_score(item['text'], original)
+            if score < .8:
+                continue
+            if sender and item['sender'] and _quote_normalize(item['sender']) != _quote_normalize(sender):
+                continue
+            nearby = [other['text'] for other in candidates
+                      if other['element'] != item['element']
+                      and abs(other['bounds'][1] - item['bounds'][1]) < current.height * .2]
+            if context and not any(_quote_normalize(context) == _quote_normalize(line) for line in nearby):
+                continue
+            if score < 1 and not context:
+                continue  # 80% is retrieval, not proof of message identity.
+            matches.append(item)
+        # Prefer the full exact original over fuzzy substrings of the same OCR
+        # block, but never collapse two different message locations.
+        exact = [item for item in matches if _quote_score(item['text'], original) == 1]
+        if exact:
+            matches = exact
+        if len(matches) > 1:
+            return failure('quote_ambiguous')
+        if matches:
+            target = matches[0]
+            # Existing matching text in the composer area cannot prove a newly
+            # selected quote. Do not operate on an already quoted draft.
+            if _quote_preview(current, target['text'], sender):
+                return failure('quote_existing_preview')
+            pressed = _run_and_capture(backend, 'long_press',
+                lambda: backend.long_press(element=target['element'], duration_ms=700))
+            if not pressed.ok or pressed.capture is None:
+                return failure('quote_long_press_failed')
+            current = pressed.capture
+            buttons = [e for e in current.elements if e.enabled and _label(e).casefold() in {'引用', 'quote'}]
+            if current.current_package != WECHAT_PACKAGE or len(buttons) != 1:
+                if current.current_package == WECHAT_PACKAGE:
+                    backend.keyevent('BACK')
+                return failure('quote_menu_unavailable')
+            selected = _run_and_capture(backend, 'tap', lambda: backend.tap(element=buttons[0].index))
+            if not selected.ok or selected.capture is None:
+                return failure('quote_selection_failed')
+            current = _settle_capture(backend, selected.capture,
+                lambda c: _quote_preview(c, target['text'], sender))
+            if not _chat_is_open(current, chat) or not _quote_preview(current, target['text'], sender):
+                return failure('quote_preview_unverified')
+            return ActionResult(ok=True, action='quote', capture=current,
+                                meta={'quote_text': target['text'], 'quote_sender': sender,
+                                      'quote_verified': True})
+        signature = tuple(item['text'] for item in candidates)
+        if signature in seen:
+            return failure('quote_not_found')
+        seen.add(signature)
+        if page + 1 < max_pages:
+            moved = backend.swipe(direction='down',
+                from_xy=(current.width // 2, int(current.height * .3)),
+                to_xy=(current.width // 2, int(current.height * .65)), duration_ms=300)
+            if not moved.ok:
+                return failure('quote_scroll_failed')
+            backend.wait(.2)
+    return failure('quote_not_found')
+
+
+def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str = '',
+                quote_sender: str = '', quote_context: str = '', quote_max_pages: int = 3,
                 on_delivery: Optional[Callable[[str], None]] = None) -> ActionResult:
     opened = open_chat(backend, chat)
     if not opened.ok or opened.capture is None:
@@ -969,6 +1126,15 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str,
             capture=opened.capture,
         )
 
+    quote_meta = {}
+    resolved_chat = opened.meta.get('resolved_chat', chat)
+    if quote_text:
+        quoted = _prepare_quote(backend, opened.capture, resolved_chat, quote_text,
+                                quote_sender, quote_context, quote_max_pages)
+        if not quoted.ok:
+            return quoted
+        opened.capture = quoted.capture
+        quote_meta = quoted.meta
     focused = _prepare_text_input(backend, opened.capture)
     if not focused.ok or focused.capture is None:
         return ActionResult(
@@ -988,6 +1154,11 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str,
         lambda value: _find_send(value) is not None,
     )
     send = _find_send(typed.capture)
+    if quote_text and (not _chat_is_open(typed.capture, resolved_chat)
+                       or not _quote_preview(typed.capture, quote_meta['quote_text'], quote_sender)):
+        return ActionResult(ok=False, action='wechat_reply',
+                            message='quote_preview_changed_before_send', capture=typed.capture,
+                            meta={'quote_status': 'quote_preview_changed_before_send'})
     if send is None:
         return ActionResult(
             ok=False, action="wechat_reply",
@@ -995,6 +1166,7 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str,
             capture=typed.capture,
         )
 
+    reply_already_visible = bool(quote_text and _contains_reply(typed.capture, text))
     if on_delivery is not None:
         on_delivery("attempted")  # Commit before issuing the irreversible tap.
     sent = _run_and_capture(backend, "tap", lambda: backend.tap(element=send.index))
@@ -1003,7 +1175,7 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str,
             ok=False, action="wechat_reply",
             message=sent.message or "WeChat send action failed",
             capture=sent.capture,
-            meta={"delivery_attempted": True, "delivery_status": "uncertain"},
+            meta={**quote_meta, "delivery_attempted": True, "delivery_status": "uncertain"},
         )
 
     # ADB reports success when it injects a tap, even if WeChat drops that
@@ -1011,7 +1183,7 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str,
     # when fresh captures keep showing the Send button: after a real send the
     # draft clears and that button disappears. Use its current coordinates so
     # a refreshed OCR element index cannot point at a different control.
-    if not _contains_reply(sent.capture, text) and _find_send(sent.capture) is not None:
+    if not quote_text and not _contains_reply(sent.capture, text) and _find_send(sent.capture) is not None:
         sent.capture = _settle_capture(
             backend,
             sent.capture,
@@ -1045,17 +1217,25 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str,
                     },
                 )
 
-    sent.capture = _settle_capture(
-        backend, sent.capture,
-        lambda value: _contains_reply(value, text),
-    )
-    if _contains_reply(sent.capture, text):
+    def delivery_visible(value):
+        if not _contains_reply(value, text):
+            return False
+        if not quote_text:
+            return True
+        # An original/old bubble must not masquerade as a newly sent reply.
+        # Without stable message IDs, an existing identical reply is uncertain.
+        return (not reply_already_visible and _find_send(value) is None
+                and not _quote_preview(value, quote_meta['quote_text'], quote_sender)
+                and _chat_is_open(value, resolved_chat))
+
+    sent.capture = _settle_capture(backend, sent.capture, delivery_visible)
+    if delivery_visible(sent.capture):
         if on_delivery is not None:
             on_delivery("confirmed")
         return ActionResult(
             ok=True, action="wechat_reply",
             message=f"sent reply to WeChat chat {chat!r}", capture=sent.capture,
-            meta={"delivery_attempted": True, "delivery_status": "confirmed"},
+            meta={**quote_meta, "delivery_attempted": True, "delivery_status": "confirmed"},
         )
 
     return ActionResult(
@@ -1065,11 +1245,12 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str,
             "the reply was not retried to avoid a duplicate"
         ),
         capture=sent.capture,
-        meta={"delivery_attempted": True, "delivery_status": "uncertain"},
+        meta={**quote_meta, "delivery_attempted": True, "delivery_status": "uncertain"},
     )
 
 
-def reply(backend: PhoneBackend, chat: str, text: str,
+def reply(backend: PhoneBackend, chat: str, text: str, *, quote_text: str = '',
+          quote_sender: str = '', quote_context: str = '', quote_max_pages: int = 3,
           on_delivery: Optional[Callable[[str], None]] = None) -> ActionResult:
     """Open a WeChat chat, recover once if needed, and always return Home."""
     result: ActionResult = ActionResult(
@@ -1085,10 +1266,26 @@ def reply(backend: PhoneBackend, chat: str, text: str,
             on_delivery(state)
 
     try:
-        for attempt in range(2):
+        if not all(isinstance(v, str) for v in (quote_text, quote_sender, quote_context)):
+            result.message = 'quote fields must be strings'
+            return result
+        if (quote_sender or quote_context) and not quote_text.strip():
+            result.message = 'quote_text is required with quote hints'
+            return result
+        if quote_text and (not quote_text.strip() or len(quote_text) > 2000
+                           or len(quote_context) > 2000 or len(quote_sender) > 100):
+            result.message = 'invalid quote text or hints'
+            return result
+        quote_max_pages = max(1, min(int(quote_max_pages), 8))
+        for attempt in range(1 if quote_text else 2):
             try:
-                result = (_reply_once(backend, chat, text, record_delivery)
-                          if on_delivery is not None else _reply_once(backend, chat, text))
+                if quote_text:
+                    result = _reply_once(backend, chat, text, quote_text=quote_text,
+                        quote_sender=quote_sender, quote_context=quote_context, quote_max_pages=quote_max_pages,
+                        on_delivery=record_delivery if on_delivery is not None else None)
+                else:
+                    result = _reply_once(backend, chat, text,
+                        on_delivery=record_delivery if on_delivery is not None else None)
             except Exception as exc:
                 logger.exception("WeChat reply attempt %d failed", attempt + 1)
                 result = ActionResult(
@@ -1098,7 +1295,7 @@ def reply(backend: PhoneBackend, chat: str, text: str,
                 )
             if result.ok:
                 return result
-            if result.meta.get("delivery_attempted"):
+            if quote_text or result.meta.get("delivery_attempted"):
                 return result
             if attempt == 0:
                 logger.warning(
@@ -1118,6 +1315,8 @@ def reply(backend: PhoneBackend, chat: str, text: str,
         )
         return result
     finally:
+        if quote_text and not result.ok:
+            result.meta['draft_may_remain'] = True
         home = _run_and_capture(
             backend,
             "keyevent",

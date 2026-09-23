@@ -5,6 +5,9 @@ English | [中文](README_CN.md)
 Two [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugins + one
 Android helper APK that let Hermes control and react to a virtual Android phone.
 
+Experimental [WeChat quoted replies](QUOTED_REPLIES.md) locate an observed
+original and verify its quote preview before sending. Device validation pending.
+
 ## Components
 
 | Component | Type | Purpose |

@@ -83,7 +83,7 @@ class WorkflowScope:
 _workflow_lock = threading.Lock()
 _workflow_scopes: Dict[tuple[str, str], WorkflowScope] = {}
 _reply_result_lock = threading.Lock()
-_reply_results: Dict[tuple[str, str, str, str], str] = {}
+_reply_results: Dict[tuple[str, str, str, str, str], str] = {}
 
 
 class DeviceOperationQueue:
@@ -224,24 +224,24 @@ def reset_backend_for_tests() -> None:
 
 
 def _reply_result_key(
-    task_id: str, session_id: str, chat: str, text: str,
-) -> tuple[str, str, str, str]:
-    return (task_id.strip(), session_id.strip(), chat.strip(), text)
+    task_id: str, session_id: str, chat: str, text: str, quote_identity: str = '',
+) -> tuple[str, str, str, str, str]:
+    return (task_id.strip(), session_id.strip(), chat.strip(), text, quote_identity)
 
 
 def _cached_reply_result(
-    task_id: str, session_id: str, chat: str, text: str,
+    task_id: str, session_id: str, chat: str, text: str, quote_identity: str = '',
 ) -> Optional[str]:
     if not task_id.strip():
         return None
     with _reply_result_lock:
         return _reply_results.get(
-            _reply_result_key(task_id, session_id, chat, text),
+            _reply_result_key(task_id, session_id, chat, text, quote_identity),
         )
 
 
 def _remember_reply_result(
-    task_id: str, session_id: str, chat: str, text: str, result: Any,
+    task_id: str, session_id: str, chat: str, text: str, result: Any, quote_identity: str = '',
 ) -> None:
     if not task_id.strip() or not isinstance(result, str):
         return
@@ -257,7 +257,7 @@ def _remember_reply_result(
         if len(_reply_results) >= 256:
             _reply_results.pop(next(iter(_reply_results)))
         _reply_results[
-            _reply_result_key(task_id, session_id, chat, text)
+            _reply_result_key(task_id, session_id, chat, text, quote_identity)
         ] = result
 
 
@@ -436,9 +436,13 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
         and event_policy.instruction_source
         and event_policy.action_allowed(action)
     )
+    quote_identity = json.dumps([args.get(key, '') for key in (
+        'quote_text', 'quote_sender', 'quote_context',
+    )], ensure_ascii=False) if args.get('quote_text') else ''
     if trusted_auto_wechat_reply:
         cached = _cached_reply_result(
             task_id, session_id, args.get("chat", ""), args.get("text", ""),
+            quote_identity,
         )
         if cached is not None:
             return cached
@@ -536,6 +540,7 @@ def _dispatch_under_device_lock(backend, action, args, task_id, session_id,
             args.get("chat", ""),
             args.get("text", ""),
             result,
+            quote_identity,
         )
     return result
 
@@ -706,9 +711,12 @@ def _summarize_action(action: str, args: Dict[str, Any]) -> str:
         return f"open WeChat chat {args.get('chat', '?')!r}"
     if action == "wechat_reply":
         text = args.get("text", "")
-        return (
-            f"reply to WeChat chat {args.get('chat', '?')!r} with: {text}"
-        )
+        description = f"reply to WeChat chat {args.get('chat', '?')!r} with: {text}"
+        if args.get('quote_text'):
+            description += (f"; quoting {args['quote_text']!r}"
+                            f"; sender={args.get('quote_sender', '')!r}"
+                            f"; context={args.get('quote_context', '')!r}")
+        return description
     if action == "begin_workflow":
         return f"approve phone workflow: {args.get('goal', '?')}"
     return action
@@ -832,7 +840,10 @@ def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
     if action == "wechat_reply":
         chat = args.get("chat", "")
         text = args.get("text", "")
-        res = reply_to_wechat(backend, chat, text)
+        quote_options = {key: args[key] for key in (
+            'quote_text', 'quote_sender', 'quote_context', 'quote_max_pages',
+        ) if key in args}
+        res = reply_to_wechat(backend, chat, text, **quote_options)
         logger.info(
             "wechat_reply outcome: ok=%s chat=%r detail=%s",
             res.ok,

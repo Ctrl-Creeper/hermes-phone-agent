@@ -154,6 +154,8 @@ exclusive device-ownership mechanism for concurrent human/other-host use.
 
 Experimental [attachment sending](ATTACHMENTS.md) adds checksum-bound file/original-image delivery through the File picker; device validation is pending.
 
+Experimental [history search](HISTORY_SEARCH.md) finds bounded keyword snippets inside a verified chat using WeChat's own search page.
+
 `phone_use` includes composite actions for opening a conversation, collecting
 recent context, and replying. Conversation titles are found through WeChat
 search and verified after navigation, so workflows do not depend on a fixed

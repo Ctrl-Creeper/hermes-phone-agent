@@ -28,6 +28,7 @@ from .wechat import reply as reply_to_wechat
 from .wechat import accept_friend_request as accept_wechat_friend_request
 from .wechat import send_attachment
 from .adb_backend import read_attachment
+from .wechat import search_history
 from .wechat_context import collect_context as collect_wechat_context
 
 logger = logging.getLogger(__name__)
@@ -52,12 +53,14 @@ _SAFE_ACTIONS = frozenset({
 _PACKAGE_AWARE_ACTIONS = frozenset({"launch_app", "stop_app"})
 _FIXED_PACKAGE_ACTIONS = {
     "wechat_send_attachment": "com.tencent.mm",
+    "wechat_search_history": "com.tencent.mm",
     "wechat_open_chat": "com.tencent.mm",
     "wechat_reply": "com.tencent.mm",
     "wechat_collect_context": "com.tencent.mm",
 }
 
 _APPROVAL_REQUIRED = frozenset({
+    "wechat_search_history",
     "tap", "double_tap", "long_press", "swipe",
     "type", "clear_text", "set_text", "keyevent",
     "launch_app", "stop_app",
@@ -727,6 +730,8 @@ def _summarize_action(action: str, args: Dict[str, Any]) -> str:
         attachment = args.get('_attachment', {})
         return (f"send file {args.get('file_path')!r} to WeChat {args.get('chat')!r}; "
                 f"size={attachment.get('size')} SHA-256={attachment.get('sha256')}")
+    if action == 'wechat_search_history':
+        return f"search WeChat history in {args.get('chat')!r} for {args.get('query')!r}"
     if action in ("tap", "double_tap", "long_press"):
         if args.get("element") is not None:
             return f"{action} element #{args['element']}"
@@ -775,6 +780,9 @@ def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
             return json.dumps({'ok': False, 'error': 'Attachment preflight required'})
         return _text_response(send_attachment(backend, args.get('chat', ''),
                                              attachment['path'], attachment['sha256']))
+    if action == 'wechat_search_history':
+        return _text_response(search_history(backend, args.get('chat', ''), args.get('query', ''),
+                                             max_pages=args.get('max_pages', 3)))
     if action == "capture":
         mode = args.get("mode", "som")
         if mode not in ("som", "screenshot", "hierarchy"):

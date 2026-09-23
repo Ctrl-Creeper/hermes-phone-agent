@@ -1490,6 +1490,86 @@ def send_attachment(backend: PhoneBackend, chat: str, path: str, sha256: str) ->
             result.meta['home_cleanup_failed'] = True
 
 
+def search_history(backend: PhoneBackend, chat: str, query: str, *, max_pages: int = 3) -> ActionResult:
+    """Search one verified conversation using WeChat's own history search."""
+    result = ActionResult(ok=False, action='wechat_search_history')
+    try:
+        if not isinstance(query, str) or not query.strip() or len(query) > 100:
+            result.message = 'query must contain 1–100 characters'
+            return result
+        max_pages = max(1, min(int(max_pages), 8))
+        opened = open_chat(backend, chat)
+        if not opened.ok or opened.capture is None:
+            result.message = opened.message
+            return result
+        current = backend.capture(mode='image_hierarchy')
+        for labels in ({'聊天信息', 'Chat Info', 'Chat info', '更多信息', 'More info'},
+                       {'查找聊天记录', 'Search Chat History', 'Search chat history'}):
+            matches = [e for e in current.elements if e.enabled and _label(e) in labels]
+            if current.current_package != WECHAT_PACKAGE or len(matches) != 1:
+                result.message = 'History search entry unsupported or ambiguous'
+                return result
+            navigated = _run_and_capture(backend, 'tap', lambda: backend.tap(element=matches[0].index))
+            if not navigated.ok or navigated.capture is None:
+                result.message = 'History search navigation failed'
+                return result
+            current = backend.capture(mode='image_hierarchy')
+        inputs = [e for e in current.elements if e.enabled and 'EditText' in e.class_name]
+        if current.current_package != WECHAT_PACKAGE or len(inputs) != 1:
+            result.message = 'Search input not uniquely identified'
+            return result
+        if not backend.tap(element=inputs[0].index).ok or not backend.set_text(query).ok:
+            result.message = 'Could not enter history query'
+            return result
+        if not backend.keyevent('ENTER').ok:
+            result.message = 'Could not submit history query'
+            return result
+        rows = []
+        seen = set()
+        for page in range(max_pages):
+            current = backend.capture(mode='image_hierarchy')
+            fields = [e for e in current.elements if 'EditText' in e.class_name]
+            if (current.current_package != WECHAT_PACKAGE or len(fields) != 1
+                    or _label(fields[0]) != query):
+                result.message = 'Search query/page changed; results discarded'
+                return result
+            if any(_label(e) in {'无搜索结果', '没有找到相关结果', 'No results', 'No Results'}
+                   for e in current.elements):
+                result.meta['stop_reason'] = 'no_results' if not rows else 'end_of_results'
+                break
+            visible = [e for e in sorted(current.elements, key=lambda e: (e.bounds[1], e.bounds[0]))
+                       if e.enabled and 'EditText' not in e.class_name
+                       and current.height * .15 <= e.bounds[1]
+                       and e.bounds[3] < current.height * .85
+                       and query.casefold() in _label(e).casefold()]
+            signature = tuple(_label(e) for e in visible)
+            if signature in seen:
+                result.meta['stop_reason'] = 'repeated_page'
+                break
+            seen.add(signature)
+            rows.extend({'text': _label(e), 'page': page + 1} for e in visible)
+            result.meta['pages'] = page + 1
+            if page + 1 < max_pages:
+                if not backend.swipe(direction='up', duration_ms=300).ok:
+                    result.meta['stop_reason'] = 'scroll_failed'
+                    break
+                backend.wait(.2)
+        result.ok = True
+        result.message = 'Collected visible history-search snippets'
+        result.meta.update(chat=chat, query=query, results=rows[:100], coverage='partial',
+                           untrusted_content=True)
+        result.meta.setdefault('stop_reason', 'page_limit')
+        return result
+    except Exception as exc:
+        result.message = f'History search failed: {exc}'
+        return result
+    finally:
+        try:
+            backend.keyevent('HOME')
+        except Exception:
+            result.meta['home_cleanup_failed'] = True
+
+
 def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult:
     """Accept one named WeChat friend request and always return Home."""
     requester = requester.strip()

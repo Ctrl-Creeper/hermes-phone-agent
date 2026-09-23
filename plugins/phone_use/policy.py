@@ -82,6 +82,8 @@ class PolicyDecision:
     instruction_source: bool = False
     notes: str = ""
     source: str = "default"
+    # Set by the authenticated event adapter, never by model arguments.
+    delivery_identity: str = ""
 
     @property
     def is_auto(self) -> bool:

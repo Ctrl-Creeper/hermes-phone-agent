@@ -347,11 +347,50 @@ async def _dispatch_with_event_policy(
             existing_prompt,
         ) if part
     )
+    # Hermes returns from handle_message after spawning its background task.
+    # Wait for that task, rather than clearing the screen on enqueue. Serialize
+    # same-lane notifications so a pending event does not inherit the previous
+    # event's ContextVar policy / durable delivery identity when Hermes drains it.
+    if hasattr(telegram_adapter, "_session_tasks"):
+        from gateway.session import build_session_key
+        extra = telegram_adapter.config.extra
+        key = build_session_key(
+            message.source,
+            group_sessions_per_user=extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
+        )
+        locks = getattr(telegram_adapter, "_phone_dispatch_locks", None)
+        if locks is None:
+            locks = telegram_adapter._phone_dispatch_locks = {}
+        lock = locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            await _wait_phone_session(telegram_adapter, key)
+            with _event_policy_scope(decision):
+                await telegram_adapter.handle_message(message)
+                await _wait_phone_session(telegram_adapter, key)
+        return
+
+    # Synchronous adapters (including older integrations) finish on return.
     with _event_policy_scope(decision):
         try:
             await telegram_adapter.handle_message(message)
         finally:
             _return_phone_home()
+
+
+async def _wait_phone_session(adapter, key: str) -> None:
+    while True:
+        task = adapter._session_tasks.get(key)
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                raise
+        except Exception:
+            # A failed previous turn must not discard the next notification.
+            logger.exception("Phone gateway background turn failed")
 
 
 async def _send_direct_report(
@@ -587,6 +626,15 @@ class PhoneEventAdapter:
                 event.meta["_policy_instruction_source"] = True
             if decision.notes:
                 event.meta["_policy_summary"] = decision.notes
+            if decision.is_auto and decision.instruction_source:
+                # Hash before redaction. postTime and notification key survive
+                # helper reconnects; identical later messages remain new tasks.
+                identity = json.dumps([
+                    getattr(self, "_serial", ""), event.package,
+                    event.meta.get("notification_key", ""), event.timestamp,
+                    event.title, event.body,
+                ], ensure_ascii=False, sort_keys=True)
+                decision = replace(decision, delivery_identity=hashlib.sha256(identity.encode()).hexdigest())
 
         # Ignore decisions must not consume the shared event-rate allowance.
         if not self._event_filter or not self._event_filter.should_forward(event):

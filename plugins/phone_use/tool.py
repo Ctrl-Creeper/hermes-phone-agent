@@ -93,9 +93,10 @@ class DeviceOperationQueue:
         self._condition = threading.Condition()
         self._waiting = deque()
         self._active = False
+        self._owner = ""
 
     @contextmanager
-    def turn(self, action: str, task_id: str = "", session_id: str = ""):
+    def turn(self, action: str, task_id: str = "", session_id: str = "", *, retain: bool = False):
         token = object()
         with self._condition:
             self._waiting.append(token)
@@ -105,10 +106,14 @@ class DeviceOperationQueue:
                     "phone device queue: queued action=%s position=%d task=%s session=%s",
                     action, position, task_id or "-", session_id or "-",
                 )
-            while self._active or self._waiting[0] is not token:
+            while self._active or (self._owner and self._owner != task_id) or (
+                not self._owner and self._waiting[0] is not token
+            ):
                 self._condition.wait()
-            self._waiting.popleft()
+            self._waiting.remove(token)
             self._active = True
+            if retain and task_id:
+                self._owner = task_id
 
         logger.info(
             "phone device queue: starting action=%s task=%s session=%s",
@@ -119,6 +124,16 @@ class DeviceOperationQueue:
         finally:
             with self._condition:
                 self._active = False
+                self._condition.notify_all()
+
+    def owns(self, task_id: str) -> bool:
+        with self._condition:
+            return bool(task_id) and self._owner == task_id
+
+    def release(self, task_id: str) -> None:
+        with self._condition:
+            if task_id and self._owner == task_id:
+                self._owner = ""
                 self._condition.notify_all()
 
 
@@ -191,7 +206,8 @@ def _get_backend() -> PhoneBackend:
 
 
 def reset_backend_for_tests() -> None:
-    global _backend, _session_auto_approve, _always_allow
+    global _backend, _session_auto_approve, _always_allow, _device_operation_queue
+    _device_operation_queue = DeviceOperationQueue()
     with _backend_lock:
         if _backend is not None:
             try:
@@ -337,13 +353,20 @@ def _begin_workflow(args: Dict[str, Any], task_id: str, session_id: str) -> str:
 def _finish_workflow(task_id: str, session_id: str) -> bool:
     existed = _clear_workflow(task_id, session_id)
     if existed:
-        return_phone_home()
+        return_phone_home(task_id)
     return existed
 
 
 def _finish_turn(task_id: str, session_id: str) -> None:
-    _finish_workflow(task_id, session_id)
-    _clear_reply_results(task_id, session_id)
+    try:
+        if _device_operation_queue.owns(task_id):
+            _clear_workflow(task_id, session_id)
+            return_phone_home(task_id)
+        else:
+            _finish_workflow(task_id, session_id)
+    finally:
+        _clear_reply_results(task_id, session_id)
+        _device_operation_queue.release(task_id)
 
 
 def _result_failed(result: Any) -> bool:
@@ -382,7 +405,7 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
         return _begin_workflow(args, task_id, session_id)
     if action == "end_workflow":
         _clear_workflow(task_id, session_id)
-        return_phone_home()
+        return_phone_home(task_id)
         return json.dumps({
             "ok": True,
             "workflow_active": False,
@@ -442,7 +465,20 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
             "hint": "Ensure adb is on PATH and an emulator is running.",
         }), task_id, session_id, workflow_active)
 
-    # Policy enforcement: check if the action is allowed for the target package.
+    # A trusted automatic turn owns the phone across tool calls, including
+    # web research between them. The existing on_session_end hook releases it.
+    retain = bool(task_id and event_policy and event_policy.is_auto
+                  and event_policy.instruction_source)
+    with _device_operation_queue.turn(action, task_id, session_id, retain=retain):
+        result = _dispatch_under_device_lock(backend, action, args, task_id, session_id,
+                                            trusted_auto_wechat_reply, policy)
+    return _finish_failed_workflow(result, task_id, session_id, workflow_active)
+
+
+def _dispatch_under_device_lock(backend, action, args, task_id, session_id,
+                                trusted_auto_wechat_reply, policy):
+    # Check the foreground only after acquiring ownership: another task may
+    # have changed it while this task was waiting.
     # For launch_app/stop_app, the explicit 'package' arg is the target.
     # For all other non-safe actions, use the foreground app — ignore any
     # agent-supplied 'package' to prevent policy bypass.
@@ -456,38 +492,42 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
             fg = backend.current_app()
             target_pkg = fg.get("package", "")
         except Exception as e:
-            return _finish_failed_workflow(json.dumps({
+            return json.dumps({
                 "error": "unable to enforce phone app policy",
                 "action": action,
                 "reason": f"foreground app lookup failed: {e}",
-            }), task_id, session_id, workflow_active)
+            })
         if not target_pkg:
-            return _finish_failed_workflow(json.dumps({
+            return json.dumps({
                 "error": "unable to enforce phone app policy",
                 "action": action,
                 "reason": "foreground app package is unknown",
-            }), task_id, session_id, workflow_active)
+            })
     if target_pkg:
         decision = policy.check_action(action, target_pkg)
         if not decision.action_allowed(action):
-            return _finish_failed_workflow(json.dumps({
+            return json.dumps({
                 "error": "blocked by phone policy",
                 "action": action,
                 "package": target_pkg,
                 "reason": decision.notes or f"policy restricts '{action}' on '{target_pkg}'",
                 "hint": "Edit phone-policy.yaml to change this rule.",
-            }), task_id, session_id, workflow_active)
+            })
 
-    with _device_operation_queue.turn(action, task_id, session_id):
-        try:
+    try:
+        if trusted_auto_wechat_reply:
+            cached = _cached_reply_result(task_id, session_id, args.get("chat", ""), args.get("text", ""))
+            if cached is not None:
+                return cached
+            decision = get_event_policy()
+            if decision.delivery_identity:
+                return _durable_wechat_reply(backend, args, decision.delivery_identity)
             result = _dispatch(backend, action, args)
-        except ValueError as e:
-            result = _error_response_with_capture(backend, action, str(e))
-        except Exception as e:
-            logger.exception("phone_use %s failed", action)
-            result = _error_response_with_capture(
-                backend, action, f"{action} failed: {e}",
-            )
+        else:
+            result = _dispatch(backend, action, args)
+    except Exception as e:
+        logger.exception("phone_use %s failed", action)
+        result = _error_response_with_capture(backend, action, f"{action} failed: {e}")
 
     if trusted_auto_wechat_reply:
         _remember_reply_result(
@@ -497,9 +537,41 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
             args.get("text", ""),
             result,
         )
-    return _finish_failed_workflow(
-        result, task_id, session_id, workflow_active,
-    )
+    return result
+
+
+def _durable_wechat_reply(backend, args, identity: str) -> str:
+    from .delivery import DeliveryJournal, state_directory
+
+    chat, text = args.get("chat", ""), args.get("text", "")
+    if not isinstance(chat, str) or not chat.strip() or not isinstance(text, str) or not text.strip():
+        return json.dumps({"ok": False, "error": "wechat_reply requires chat and text"})
+    journal = DeliveryJournal(state_directory())
+    with journal.receipt(identity, _resolve_android_serial() or "default", chat, text) as receipt:
+        state = receipt.state
+        if state != "prepared":
+            return json.dumps({
+                "ok": state == "confirmed", "action": "wechat_reply",
+                "message": ("Previously confirmed reply; not sent again" if state == "confirmed"
+                            else "Previous send may have completed; not sent again. Report uncertainty through Telegram."),
+                "meta": {"delivery_attempted": True, "delivery_status":
+                         "confirmed" if state == "confirmed" else "uncertain", "duplicate_suppressed": True},
+            })
+        receipt.record("prepared")
+        try:
+            result = reply_to_wechat(backend, chat, text, on_delivery=receipt.record)
+        except Exception as exc:
+            state = receipt.state
+            if state == "prepared":
+                raise
+            result = ActionResult(
+                ok=state == "confirmed", action="wechat_reply", message=str(exc),
+                meta={"delivery_attempted": True, "delivery_status":
+                      "confirmed" if state == "confirmed" else "uncertain"},
+            )
+        if result.meta.get("delivery_attempted") and receipt.state != "confirmed":
+            receipt.record("uncertain")
+        return _text_response(result)
 
 
 def _request_approval(
@@ -933,11 +1005,11 @@ def _error_response_with_capture(
     return json.dumps(payload)
 
 
-def return_phone_home() -> None:
+def return_phone_home(task_id: str = "") -> None:
     """Best-effort workflow cleanup used by the phone event adapter."""
     try:
         backend = _get_backend()
-        with _device_operation_queue.turn("return_home"):
+        with _device_operation_queue.turn("return_home", task_id):
             res = backend.keyevent("HOME")
             _maybe_follow_capture(backend, res, True)
     except Exception:

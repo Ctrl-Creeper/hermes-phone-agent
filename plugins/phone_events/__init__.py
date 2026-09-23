@@ -10,6 +10,7 @@ import os
 
 from .adapter import (
     PhoneEventAdapter,
+    _prepend_phone_report_context,
     check_phone_events_requirements,
 )
 
@@ -44,6 +45,7 @@ def _phone_events_env_config():
 
 
 def register(ctx) -> None:
+    ctx.register_hook("transform_llm_output", _prepend_phone_report_context)
     ctx.register_platform(
         name="phone_events",
         label="Phone Events",

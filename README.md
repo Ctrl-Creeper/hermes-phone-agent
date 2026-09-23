@@ -181,6 +181,9 @@ For automated task inboxes, add an `event_rules` entry to your copied
 The included reply flow retries navigation failures before sending; after a
 send attempt it never resends an unconfirmed message, preventing duplicate
 long replies after web research.
+For automatic WeChat tasks, the final Telegram report starts with the source
+chat and the original triggering message before the agent's result. This
+report header is Hermes-specific; it is not part of the shared phone backend.
 
 For an authenticated automatic WeChat reply, the workflow snapshots confirmed
 incoming bubbles when it enters the chat and scans once more immediately before

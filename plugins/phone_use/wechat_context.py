@@ -9,9 +9,8 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from .backend import ActionResult, CaptureResult, PhoneBackend
-from .wechat import (open_chat, _find_chat_header, _is_search_page,
-                     _normalize_chat_title, quote_message_candidates)
 from .host_ocr import analyze_image
+from .wechat import _find_chat_header, _is_search_page, _normalize_chat_title, open_chat, quote_message_candidates
 
 logger = logging.getLogger(__name__)
 _CONVERT_VOICE_LABELS = frozenset({"转文字", "转文字（普通话）", "转文字(普通话)",

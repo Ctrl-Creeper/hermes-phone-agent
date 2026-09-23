@@ -1,6 +1,8 @@
 """Public behavior for the conservative end-of-chat WeChat inbox scan."""
 
 import re
+import sys
+import types
 
 from plugins.phone_use.backend import CaptureResult, UIElement
 from plugins.phone_use.wechat import capture_exit_inbox_baseline, find_exit_inbox_messages
@@ -103,6 +105,15 @@ def test_exit_inbox_callback_reenters_the_normal_phone_event_policy(monkeypatch)
     assert event.meta["_transport"] == "exit_inbox"
     assert event.meta["conversation_type"] == "group"
     assert event.title == "Example Group"
+    gateway = types.ModuleType("gateway")
+    gateway.__path__ = []
+    config = types.ModuleType("gateway.config")
+    config.Platform = types.SimpleNamespace(TELEGRAM="telegram")
+    session = types.ModuleType("gateway.session")
+    session.SessionSource = types.SimpleNamespace
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.config", config)
+    monkeypatch.setitem(sys.modules, "gateway.session", session)
     assert adapter._source_for_event(event).role_authorized
 
 

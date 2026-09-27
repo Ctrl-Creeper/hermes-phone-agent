@@ -35,7 +35,7 @@ def add_semantic_regions(
         return elements
 
     # Host OCR does not retain Android's bubble hierarchy. Mark only clearly
-    # side-aligned text; exit-inbox scanning ignores unclassified text.
+    # side-aligned text for workflows that need message direction.
     for element in elements:
         if element.class_name != "host.ocr.Text":
             continue

@@ -1559,7 +1559,7 @@ def test_auto_phone_turn_returns_to_home_after_failure(monkeypatch):
     assert cleanup == ["home"]
 
 
-def test_wechat_reply_uses_one_deterministic_action_and_always_goes_home():
+def test_auto_wechat_reply_uses_one_deterministic_action_and_goes_home_without_inbox_scan():
     calls = []
     captures = [
         [UIElement(
@@ -1647,11 +1647,14 @@ def test_wechat_reply_uses_one_deterministic_action_and_always_goes_home():
                 ),
             )
 
-    result = json.loads(phone_tool._dispatch(
-        Backend(),
-        "wechat_reply",
-        {"chat": "Example Chat", "text": "收到，我晚点看"},
-    ))
+    decision = PolicyDecision(behavior="auto", instruction_source=True,
+                              conversation_type="group")
+    with phone_tool.bind_event_policy(decision):
+        result = json.loads(phone_tool._dispatch(
+            Backend(),
+            "wechat_reply",
+            {"chat": "Example Chat", "text": "收到，我晚点看"},
+        ))
 
     assert result["ok"] is True
     assert calls == [

@@ -589,11 +589,6 @@ def _durable_wechat_reply(backend, args, identity: str) -> str:
     quote_options = {key: args[key] for key in (
         'quote_text', 'quote_sender', 'quote_context', 'quote_max_pages',
     ) if key in args}
-    event_policy = get_event_policy()
-    if (event_policy is not None and event_policy.is_auto
-            and event_policy.instruction_source
-            and event_policy.conversation_type in {'group', 'private'}):
-        quote_options['exit_inbox_conversation_type'] = event_policy.conversation_type
     quote_identity = json.dumps([args.get(key, '') for key in (
         'quote_text', 'quote_sender', 'quote_context',
     )], ensure_ascii=False) if args.get('quote_text') else ''
@@ -909,13 +904,6 @@ def _dispatch(backend: PhoneBackend, action: str, args: Dict[str, Any]) -> Any:
         quote_options = {key: args[key] for key in (
             'quote_text', 'quote_sender', 'quote_context', 'quote_max_pages',
         ) if key in args}
-        event_policy = get_event_policy()
-        conversation_type = ""
-        if (event_policy is not None and event_policy.is_auto
-                and event_policy.instruction_source):
-            conversation_type = event_policy.conversation_type
-        if conversation_type:
-            quote_options['exit_inbox_conversation_type'] = conversation_type
         res = reply_to_wechat(backend, chat, text, **quote_options)
         logger.info(
             "wechat_reply outcome: ok=%s chat=%r detail=%s",

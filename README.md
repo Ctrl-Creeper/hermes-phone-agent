@@ -185,15 +185,6 @@ For automatic WeChat tasks, the final Telegram report starts with the source
 chat and the original triggering message before the agent's result. This
 report header is Hermes-specific; it is not part of the shared phone backend.
 
-For an authenticated automatic WeChat reply, the workflow snapshots confirmed
-incoming bubbles when it enters the chat and scans once more immediately before
-returning Home. Newly visible private messages are deferred through the normal
-event-policy queue. In groups, only a new left-side message containing
-the configured `@YourBot` trigger is eligible. Unknown direction/type, quote-like `sender:`
-summaries and unclassified OCR are ignored rather than guessed. This is a
-foreground-notification backstop, not a history sync; device-layout validation
-is still required before relying on it for a production inbox.
-
 Authenticated WeChat friend-request notifications bypass the model and are
 reported directly to the configured Telegram destination. Reply `/approve` to
 accept the named requester without setting a remark, or `/deny` to ignore it.

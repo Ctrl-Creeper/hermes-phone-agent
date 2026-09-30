@@ -31,6 +31,7 @@ from .adb_backend import read_attachment
 from .wechat import search_history
 from .wechat import favorite_message
 from .wechat_context import collect_context as collect_wechat_context
+from .pause import PhonePaused, pause_gate
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,8 @@ _workflow_lock = threading.Lock()
 _workflow_scopes: Dict[tuple[str, str], WorkflowScope] = {}
 _reply_result_lock = threading.Lock()
 _reply_results: Dict[tuple[str, str, str, str, str], str] = {}
+_phone_task_lock = threading.Lock()
+_phone_tasks: Dict[str, int] = {}
 
 
 class DeviceOperationQueue:
@@ -101,10 +104,20 @@ class DeviceOperationQueue:
         self._condition = threading.Condition()
         self._waiting = deque()
         self._active = False
+        self._active_task_id = ""
         self._owner = ""
 
+    def abort_waiters(self) -> None:
+        with self._condition:
+            self._condition.notify_all()
+
+    def task_ids(self) -> set[str]:
+        with self._condition:
+            return {task for task in (self._active_task_id, self._owner) if task}
+
     @contextmanager
-    def turn(self, action: str, task_id: str = "", session_id: str = "", *, retain: bool = False):
+    def turn(self, action: str, task_id: str = "", session_id: str = "", *,
+             retain: bool = False, generation: Optional[int] = None):
         token = object()
         with self._condition:
             self._waiting.append(token)
@@ -114,12 +127,22 @@ class DeviceOperationQueue:
                     "phone device queue: queued action=%s position=%d task=%s session=%s",
                     action, position, task_id or "-", session_id or "-",
                 )
-            while self._active or (self._owner and self._owner != task_id) or (
-                not self._owner and self._waiting[0] is not token
-            ):
-                self._condition.wait()
+            try:
+                while self._active or (self._owner and self._owner != task_id) or (
+                    not self._owner and self._waiting[0] is not token
+                ):
+                    if generation is not None:
+                        pause_gate.ensure_active(generation)
+                    self._condition.wait()
+                if generation is not None:
+                    pause_gate.ensure_active(generation)
+            except BaseException:
+                self._waiting.remove(token)
+                self._condition.notify_all()
+                raise
             self._waiting.remove(token)
             self._active = True
+            self._active_task_id = task_id
             if retain and task_id:
                 self._owner = task_id
 
@@ -132,6 +155,7 @@ class DeviceOperationQueue:
         finally:
             with self._condition:
                 self._active = False
+                self._active_task_id = ""
                 self._condition.notify_all()
 
     def owns(self, task_id: str) -> bool:
@@ -146,6 +170,44 @@ class DeviceOperationQueue:
 
 
 _device_operation_queue = DeviceOperationQueue()
+
+
+def pause_phone_operations() -> set[str]:
+    """Close admission synchronously; the gateway cancels these turn keys."""
+    pause_gate.pause()
+    with _phone_task_lock:
+        task_ids = set(_phone_tasks)
+    task_ids.update(_device_operation_queue.task_ids())
+    _device_operation_queue.abort_waiters()
+    with _workflow_lock:
+        _workflow_scopes.clear()
+    with _reply_result_lock:
+        _reply_results.clear()
+    return task_ids
+
+
+def resume_phone_operations() -> None:
+    pause_gate.resume()
+    _device_operation_queue.abort_waiters()
+
+
+class _GuardedBackend:
+    """Guard every plugin-visible backend primitive, including composite flows."""
+
+    def __init__(self, backend: PhoneBackend, generation: int) -> None:
+        self._backend = backend
+        self._generation = generation
+
+    def __getattr__(self, name: str):
+        value = getattr(self._backend, name)
+        if not callable(value):
+            return value
+
+        def checked(*args, **kwargs):
+            pause_gate.ensure_active(self._generation)
+            return value(*args, **kwargs)
+
+        return checked
 
 _session_auto_approve = False
 _always_allow: set = set()
@@ -225,6 +287,8 @@ def reset_backend_for_tests() -> None:
         _backend = None
     _session_auto_approve = False
     _always_allow = set()
+    with _phone_task_lock:
+        _phone_tasks.clear()
     with _workflow_lock:
         _workflow_scopes.clear()
     with _reply_result_lock:
@@ -413,7 +477,31 @@ def _finish_failed_workflow(
 # ── Dispatch ────────────────────────────────────────────────────────
 
 def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
-    """Main entry point — dispatched by hermes tools.registry."""
+    """Main entry point — gate and track phone calls before approvals."""
+    task_id = str(kwargs.get("task_id") or "")
+    try:
+        generation = pause_gate.ensure_active()
+    except PhonePaused:
+        return json.dumps({"error": "phone paused"})
+    if task_id:
+        with _phone_task_lock:
+            _phone_tasks[task_id] = _phone_tasks.get(task_id, 0) + 1
+    try:
+        return _handle_phone_use_inner(args, generation, **kwargs)
+    except PhonePaused:
+        return json.dumps({"error": "phone paused", "cancelled": True})
+    finally:
+        if task_id:
+            with _phone_task_lock:
+                count = _phone_tasks.get(task_id, 0) - 1
+                if count > 0:
+                    _phone_tasks[task_id] = count
+                else:
+                    _phone_tasks.pop(task_id, None)
+
+
+def _handle_phone_use_inner(args: Dict[str, Any], generation: int, **kwargs) -> Any:
+    """Dispatch an admitted call; every wait boundary rechecks the generation."""
     action = (args.get("action") or "").strip().lower()
     if not action:
         return json.dumps({"error": "missing 'action'"})
@@ -421,7 +509,13 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
     task_id = str(kwargs.get("task_id") or "")
     session_id = str(kwargs.get("session_id") or "")
     if action == "begin_workflow":
-        return _begin_workflow(args, task_id, session_id)
+        result = _begin_workflow(args, task_id, session_id)
+        try:
+            pause_gate.ensure_active(generation)
+        except PhonePaused:
+            _clear_workflow(task_id, session_id)
+            raise
+        return result
     if action == "end_workflow":
         _clear_workflow(task_id, session_id)
         return_phone_home(task_id)
@@ -487,6 +581,8 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
                 err, task_id, session_id, workflow_active,
             )
 
+    pause_gate.ensure_active(generation)
+
     try:
         backend = _get_backend()
     except Exception as e:
@@ -499,8 +595,9 @@ def handle_phone_use(args: Dict[str, Any], **kwargs) -> Any:
     # web research between them. The existing on_session_end hook releases it.
     retain = bool(task_id and event_policy and event_policy.is_auto
                   and event_policy.instruction_source)
-    with _device_operation_queue.turn(action, task_id, session_id, retain=retain):
-        result = _dispatch_under_device_lock(backend, action, args, task_id, session_id,
+    with _device_operation_queue.turn(action, task_id, session_id, retain=retain,
+                                      generation=generation):
+        result = _dispatch_under_device_lock(_GuardedBackend(backend, generation), action, args, task_id, session_id,
                                             trusted_auto_wechat_reply, policy)
     return _finish_failed_workflow(result, task_id, session_id, workflow_active)
 

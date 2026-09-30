@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 _STATE_LOCK = threading.RLock()
 
 
-class PhonePaused(RuntimeError):
-    """A phone action was denied because control is paused or its turn is stale."""
+class PhonePaused(BaseException):
+    """Cancellation that composite workflows must not swallow as an action error."""
 
 
 def _default_path() -> Path:

@@ -40,13 +40,12 @@ replay paused-period notifications, previously queued tasks, or old receipts.
 Two implementation options were considered. A model-callable `phone_pause`
 tool is too late when a turn is busy, and a separate Telegram bot would
 duplicate authorization and command routing. Use the existing Telegram gateway
-and add only the smallest generic pre-agent message-control seam needed if no
-existing hook can execute before the busy-session path. It must not change
-past conversation messages, system prompts, or model tool schemas. The Hermes
-phone plugin is the concrete consumer and owns phrase recognition, persisted
-state, and phone cancellation. The generic seam accepts only an authenticated
-gateway source and a handled/unhandled result; any unrelated message follows
-the existing route unchanged.
+and its `pre_gateway_dispatch` hook, which runs before busy-session handling.
+It must not change past conversation messages, system prompts, or model tool
+schemas. The Hermes phone plugin owns phrase recognition, persisted state,
+and phone cancellation. This hook runs before Hermes's own authentication, so
+the plugin must check configured owner IDs and gateway authorization explicitly.
+Unrelated messages follow the existing route unchanged.
 
 At the `phone_use` boundary, check the pause generation at admission, after
 approval waits, after acquiring the device queue, and before each physical
@@ -88,8 +87,8 @@ state, failed reconnect, repeated commands, and no replay after resume.
 Verify the actual gateway dispatch path with an isolated Hermes home and
 plugins installed; check the native phone queue and helper listener lifecycle.
 Ensure ordinary Telegram conversation remains usable and no prompt-cache
-prefix or toolset is changed. Develop in separate checkouts, submit a Hermes
-core integration PR only if its generic seam is necessary, and a separate
-hermes-phone-agent PR; deploy only after reviewed integration tests. No shared
+prefix or toolset is changed. Develop in an isolated checkout and submit a
+hermes-phone-agent PR; the existing hook avoids a Hermes core change. Deploy
+only after reviewed integration tests. No shared
 backend/helper change is expected, so MCP/Neko need no synchronization unless
 implementation reveals otherwise.

@@ -106,6 +106,41 @@ class DeviceOperationQueue:
         self._active = False
         self._active_task_id = ""
         self._owner = ""
+        self._cleanup_needed: set[str] = set()
+        self._cleanup_in_progress: set[str] = set()
+        self._cleanup_failed = False
+
+    def prepare_pause_cleanup(self) -> set[str]:
+        with self._condition:
+            targets = {task for task in (self._active_task_id, self._owner) if task}
+            self._cleanup_needed.update(targets)
+            return targets
+
+    def claim_cleanup(self, task_id: str) -> bool:
+        with self._condition:
+            if not task_id or task_id in self._cleanup_in_progress:
+                return False
+            if task_id not in self._cleanup_needed and self._owner != task_id:
+                return False
+            self._cleanup_needed.discard(task_id)
+            self._cleanup_in_progress.add(task_id)
+            return True
+
+    def finish_cleanup(self, task_id: str) -> None:
+        with self._condition:
+            self._cleanup_in_progress.discard(task_id)
+
+    def cleanup_pending(self) -> bool:
+        with self._condition:
+            return bool(self._cleanup_needed or self._cleanup_in_progress)
+
+    def cleanup_failed(self) -> bool:
+        with self._condition:
+            return self._cleanup_failed
+
+    def mark_cleanup_failed(self) -> None:
+        with self._condition:
+            self._cleanup_failed = True
 
     def abort_waiters(self) -> None:
         with self._condition:
@@ -177,7 +212,7 @@ def pause_phone_operations() -> set[str]:
     pause_gate.pause()
     with _phone_task_lock:
         task_ids = set(_phone_tasks)
-    task_ids.update(_device_operation_queue.task_ids())
+    task_ids.update(_device_operation_queue.prepare_pause_cleanup())
     _device_operation_queue.abort_waiters()
     with _workflow_lock:
         _workflow_scopes.clear()
@@ -431,9 +466,13 @@ def _finish_workflow(task_id: str, session_id: str) -> bool:
 
 def _finish_turn(task_id: str, session_id: str) -> None:
     try:
-        if _device_operation_queue.owns(task_id):
+        if _device_operation_queue.claim_cleanup(task_id):
             _clear_workflow(task_id, session_id)
-            return_phone_home(task_id)
+            try:
+                if return_phone_home(task_id) is False:
+                    _device_operation_queue.mark_cleanup_failed()
+            finally:
+                _device_operation_queue.finish_cleanup(task_id)
         else:
             _finish_workflow(task_id, session_id)
     finally:
@@ -1176,23 +1215,33 @@ def _error_response_with_capture(
     return json.dumps(payload)
 
 
-def return_phone_home(task_id: str = "") -> None:
+def return_phone_home(task_id: str = "") -> bool:
     """Best-effort workflow cleanup used by the phone event adapter."""
     try:
         backend = _get_backend()
         with _device_operation_queue.turn("return_home", task_id):
             res = backend.keyevent("HOME")
+            if not res.ok:
+                logger.error("Phone HOME cleanup was rejected: %s", res.message)
+                return False
             _maybe_follow_capture(backend, res, True)
+        return True
     except Exception:
         logger.exception("Could not return phone to Home after workflow")
+        return False
 
 
 def accept_approved_wechat_friend_request(requester: str) -> str:
     """Execute a host-approved friend request through the shared device FIFO."""
     try:
+        generation = pause_gate.ensure_active()
         backend = _get_backend()
-        with _device_operation_queue.turn("wechat_accept_friend"):
-            return _text_response(accept_wechat_friend_request(backend, requester))
+        with _device_operation_queue.turn("wechat_accept_friend", generation=generation):
+            return _text_response(accept_wechat_friend_request(
+                _GuardedBackend(backend, generation), requester,
+            ))
+    except PhonePaused:
+        return json.dumps({"ok": False, "error": "phone paused", "cancelled": True})
     except Exception as exc:
         logger.exception("Approved WeChat friend request failed")
         return json.dumps({

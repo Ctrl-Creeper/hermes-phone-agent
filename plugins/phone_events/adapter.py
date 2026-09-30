@@ -12,6 +12,7 @@ that allows a configured inbox event to be interpreted as a request.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -29,6 +30,23 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _phone_pause_gate():
+    """The tool plugin is optional; only installed pairs share a pause gate."""
+    try:
+        from hermes_plugins.phone_use.pause import pause_gate
+    except ImportError:
+        try:
+            from plugins.phone_use.pause import pause_gate
+        except ImportError:
+            return None
+    return pause_gate
+
+
+def _phone_is_paused() -> bool:
+    gate = _phone_pause_gate()
+    return bool(gate is not None and gate.snapshot()[0])
 
 # Lazy imports — the gateway framework may not be available during plugin
 # discovery. Import at class/function level.
@@ -419,12 +437,16 @@ async def _dispatch_with_event_policy(
         lock = locks.setdefault(key, asyncio.Lock())
         async with lock:
             await _wait_phone_session(telegram_adapter, key)
+            if _phone_is_paused():
+                return
             with _event_policy_scope(decision), _bind_report_origin(phone_event, decision):
                 await telegram_adapter.handle_message(message)
                 await _wait_phone_session(telegram_adapter, key)
         return
 
     # Synchronous adapters (including older integrations) finish on return.
+    if _phone_is_paused():
+        return
     with _event_policy_scope(decision), _bind_report_origin(phone_event, decision):
         try:
             await telegram_adapter.handle_message(message)
@@ -507,6 +529,9 @@ class PhoneEventAdapter:
 
         self._config = config
         self._connected = False
+        self._monitors_running = False
+        self._phone_dispatch_futures = {}
+        self._phone_dispatch_lock = threading.Lock()
         self._logcat_monitor = None
         self._socket_listener = None
         self._event_filter = None
@@ -552,8 +577,10 @@ class PhoneEventAdapter:
         """Set the callback for injecting events into the gateway."""
         self._message_callback = callback
 
-    async def connect(self, *, is_reconnect: bool = False) -> bool:
+    async def connect(self, *, is_reconnect: bool = False,
+                      force_monitors: bool = False) -> bool:
         """Start event monitors."""
+        paused_at_start = _phone_is_paused() and not force_monitors
         from .event_filter import EventFilter
         from .logcat_monitor import LogcatMonitor
         from .socket_listener import SocketListener
@@ -579,6 +606,13 @@ class PhoneEventAdapter:
                 "PHONE_EVENTS_TELEGRAM_CHAT_ID"
             )
             return False
+
+        if paused_at_start:
+            self._mark_connected()
+            self._connected = True
+            self._monitors_running = False
+            logger.info("Phone event monitors paused at startup")
+            return True
 
         self._event_filter = EventFilter.from_env()
 
@@ -613,15 +647,39 @@ class PhoneEventAdapter:
 
         self._mark_connected()
         self._connected = True
+        self._monitors_running = True
         logger.info("Phone event monitors started")
         return True
 
+    async def suspend_monitors(self) -> None:
+        """Stop physical event transports but keep the Telegram-side adapter."""
+        if self._logcat_monitor:
+            await asyncio.to_thread(self._logcat_monitor.stop)
+        if self._socket_listener:
+            await asyncio.to_thread(self._socket_listener.stop)
+        self._logcat_monitor = None
+        self._socket_listener = None
+        self._monitors_running = False
+        logger.info("Phone event monitors suspended")
+
+    async def resume_monitors(self) -> None:
+        if not getattr(self, "_monitors_running", False):
+            if not await self.connect(is_reconnect=True, force_monitors=True):
+                raise RuntimeError("phone event monitors could not connect")
+
+    def abort_phone_dispatches(self) -> dict:
+        """Cancel queued phone-origin turns and return their session sources."""
+        with self._phone_dispatch_lock:
+            running = list(self._phone_dispatch_futures.items())
+            self._phone_dispatch_futures.clear()
+        sources = {key: source for _future, (key, source) in running}
+        for future, _entry in running:
+            future.cancel()
+        return sources
+
     async def disconnect(self) -> None:
         """Stop all monitors."""
-        if self._logcat_monitor:
-            self._logcat_monitor.stop()
-        if self._socket_listener:
-            self._socket_listener.stop()
+        await self.suspend_monitors()
         self._connected = False
         self._mark_disconnected()
         logger.info("Phone event monitors stopped")
@@ -632,6 +690,8 @@ class PhoneEventAdapter:
 
     def _on_raw_event(self, event) -> None:
         """Called from monitor threads. Policy check → filter → redact → dispatch."""
+        if _phone_is_paused():
+            return
         requester = _wechat_friend_requester(event)
         if requester is not None:
             if event.meta.get("_transport") == "helper_socket":
@@ -756,6 +816,8 @@ class PhoneEventAdapter:
 
     def _dispatch_report_to_telegram(self, content: str) -> None:
         """Send a report directly to Telegram without starting an agent turn."""
+        if _phone_is_paused():
+            return
         import asyncio
 
         loop, telegram_adapter = self._telegram_dispatch_target()
@@ -795,7 +857,11 @@ class PhoneEventAdapter:
 
     def _process_friend_request(self, event: Any, requester: str) -> None:
         """Wait for approval, then enqueue the physical phone action."""
+        if _phone_is_paused():
+            return
         choice = _await_friend_request_approval(self, event)
+        if _phone_is_paused():
+            return
         if choice not in {"once", "session", "always"}:
             self._dispatch_report_to_telegram(
                 f"已忽略来自 {requester} 的微信好友请求。"
@@ -833,6 +899,8 @@ class PhoneEventAdapter:
         self, formatted: str, phone_event: Any, decision: Any = None,
     ) -> None:
         """Wake the gateway in an isolated session within the Telegram chat."""
+        if _phone_is_paused():
+            return
         import asyncio
         from gateway.platforms.base import MessageEvent, MessageType
 
@@ -866,7 +934,23 @@ class PhoneEventAdapter:
             ),
             loop,
         )
+        runner = getattr(self, "gateway_runner", None)
+        if runner is not None:
+            try:
+                key = runner._session_key_for_source(source)
+                with self._phone_dispatch_lock:
+                    if _phone_is_paused():
+                        future.cancel()
+                    else:
+                        self._phone_dispatch_futures[future] = (key, source)
+                future.add_done_callback(self._forget_phone_dispatch)
+            except Exception:
+                logger.exception("Could not track phone dispatch session")
         future.add_done_callback(self._log_dispatch_result)
+
+    def _forget_phone_dispatch(self, future) -> None:
+        with self._phone_dispatch_lock:
+            self._phone_dispatch_futures.pop(future, None)
 
     def _source_for_event(self, phone_event: Any):
         """Build a Telegram delivery source with a phone-conversation session lane."""
@@ -903,6 +987,8 @@ class PhoneEventAdapter:
     def _log_dispatch_result(future) -> None:
         try:
             future.result()
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
+            return
         except Exception:
             logger.exception("Phone event gateway dispatch failed")
 

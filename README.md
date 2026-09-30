@@ -96,6 +96,23 @@ Notification reports are redacted and truncated by default. Set
 `raw_notifications: true` only when the Telegram destination is private and
 you explicitly want verbatim notification title/body delivery.
 
+### Pause phone control from Telegram
+
+In the configured owner chat, send `暂停手机操控` or `/phone pause` to close the
+global Hermes phone gate immediately; `恢复手机操控` or `/phone resume` reconnects
+the event monitors before reopening it. `手机操控状态` or `/phone status` reports
+the state. These are whole-message commands from the configured
+`telegram_user_id` and `telegram_chat_id` (and `telegram_thread_id` if set),
+not phrases embedded in a forwarded message or a phone notification. Both
+plugins must be enabled; the gateway itself and Telegram stay online.
+
+Pause persists across gateway restarts. It cancels queued phone events and
+cooperatively interrupts active Hermes phone turns, then attempts one HOME
+cleanup before resumption. An already-issued tap or send cannot be undone;
+check the phone if the status reports cleanup failure. Resuming does not replay
+old work. This switch is scoped to Hermes's phone plugins; separate MCP/Neko
+clients and other ADB users are unaffected.
+
 ## Deterministic WeChat Workflows
 
 Voice conversion waits for the same visible transcription on two consecutive

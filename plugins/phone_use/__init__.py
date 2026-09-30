@@ -12,6 +12,7 @@ from .tool import (
     set_approval_callback,
 )
 from .policy import get_event_policy
+from .control import pre_gateway_dispatch
 
 
 _PHONE_TASK_TOOLS = frozenset({"phone_use", "web_search", "web_extract"})
@@ -53,3 +54,4 @@ def register(ctx) -> None:
     )
     ctx.register_hook("on_session_end", _cleanup_workflow_at_turn_end)
     ctx.register_hook("pre_tool_call", _guard_phone_task_tools)
+    ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)

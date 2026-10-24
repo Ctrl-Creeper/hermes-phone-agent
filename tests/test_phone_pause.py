@@ -442,7 +442,8 @@ def test_ack_falls_back_to_platform_adapter_without_adapter_for_source():
         async def send(self, chat_id, content, metadata=None):
             sent.append((chat_id, content))
 
-    platform = SimpleNamespace(value="telegram")
+    from enum import Enum
+    platform = Enum("Platform", {"TELEGRAM": "telegram"}).TELEGRAM
     source = SimpleNamespace(platform=platform, chat_id="main", thread_id=None)
     runner = SimpleNamespace(adapters={platform: Telegram()})
     asyncio.run(control._ack(runner, source, "paused"))

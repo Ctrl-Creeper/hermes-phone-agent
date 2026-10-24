@@ -226,6 +226,7 @@ def _find_conversation_tab(capture: CaptureResult) -> Optional[UIElement]:
     return next((
         element for element in capture.elements
         if element.bounds[1] >= min_y
+        and element.center()[0] < capture.width * .25
         and _normalize_chat_title(_label(element)) in _CONVERSATION_TAB_LABELS
     ), None)
 
@@ -339,9 +340,18 @@ def _return_to_conversation_list(
 def _chat_is_open(capture: CaptureResult, chat: str) -> bool:
     return (
         not _is_search_page(capture)
+        and _find_conversation_tab(capture) is None
         and _find_chat_header(capture, chat) is not None
         and _find_input(capture.elements) is not None
     )
+
+
+def _conversation_rows(capture: CaptureResult) -> list[UIElement]:
+    """Exclude header and navigation without dropping the first chat row."""
+    return [e for e in capture.elements
+            if e.bounds[1] >= max(200, int(capture.height * .085))
+            and e.bounds[3] < int(capture.height * .9)
+            and e.class_name not in {_MESSAGE_INPUT_CLASS, _SEARCH_CONTROL_CLASS}]
 
 
 def _find_label(
@@ -518,7 +528,8 @@ def _search_for_chat(
         candidates = [
             element for element in value.elements
             if element.bounds[1] >= max(220, int(value.height * 0.12))
-            and element.bounds[3] < value.height - 180
+            # The query keyboard can echo the exact chat name as a suggestion.
+            and element.bounds[3] < int(value.height * .58)
             and is_chat_result(element)
         ]
         matched = _find_text(candidates, chat)
@@ -830,7 +841,7 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
         return _search_for_chat(backend, capture, chat)
 
     input_element = _find_input(capture.elements)
-    if input_element is not None and _find_chat_header(capture, chat) is not None:
+    if _chat_is_open(capture, chat):
         return ActionResult(
             ok=True,
             action="wechat_open_chat",
@@ -841,11 +852,7 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
     # A cold/resumed LauncherUI may expose only a handful of OCR elements in
     # its first frame. Wait for enough structure to identify a chat or list.
     for _ in range(2):
-        list_elements = [
-            element for element in capture.elements
-            if element.bounds[1] >= max(220, int(capture.height * 0.12))
-            and element.bounds[3] < capture.height - 180
-        ]
+        list_elements = _conversation_rows(capture)
         if input_element is not None or _find_text(list_elements, chat) is not None:
             break
         if _is_search_page(capture) or _find_conversation_tab(capture) is not None:
@@ -858,7 +865,7 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
             logger.warning("WeChat launch settle capture failed: %s", exc)
             break
         input_element = _find_input(capture.elements)
-        if input_element is not None and _find_chat_header(capture, chat) is not None:
+        if _chat_is_open(capture, chat):
             return ActionResult(
                 ok=True,
                 action="wechat_open_chat",
@@ -876,7 +883,7 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
         else:
             capture = settled
             input_element = _find_input(capture.elements)
-            if input_element is not None and _find_chat_header(capture, chat) is not None:
+            if _chat_is_open(capture, chat):
                 return ActionResult(
                     ok=True,
                     action="wechat_open_chat",
@@ -884,11 +891,7 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
                     capture=capture,
                 )
 
-    list_elements = [
-        element for element in capture.elements
-        if element.bounds[1] >= max(220, int(capture.height * 0.12))
-        and element.bounds[3] < capture.height - 180
-    ]
+    list_elements = _conversation_rows(capture)
     target = _find_text(list_elements, chat)
     page_needs_recovery = (
         _is_search_page(capture)
@@ -903,11 +906,7 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
 
     # Only use a fresh list-row match. A message body or notification preview
     # with the same text must never be treated as a conversation target.
-    list_elements = [
-        element for element in capture.elements
-        if element.bounds[1] >= max(220, int(capture.height * 0.12))
-        and element.bounds[3] < capture.height - 180
-    ]
+    list_elements = _conversation_rows(capture)
     target = _find_text(list_elements, chat)
     if target is None:
         return _search_for_chat(backend, capture, chat)

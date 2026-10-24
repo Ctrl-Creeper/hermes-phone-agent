@@ -55,6 +55,18 @@ def add_semantic_regions(
     ]
     if not title_candidates:
         return elements
+    # Contacts/Discover/Me have titles and content but no composer. Require
+    # both navigation labels in their bottom slots, not arbitrary message text.
+    has_chat_tab = any(
+        e.bounds[1] >= height * .9 and e.center()[0] < width * .25
+        and e.text.strip().casefold() in {'wechat', '微信', 'chats', '聊天'}
+        for e in elements
+    )
+    has_contacts_tab = any(
+        e.bounds[1] >= height * .9 and width * .25 <= e.center()[0] < width * .5
+        and e.text.strip().casefold() in {'contacts', '通讯录'}
+        for e in elements
+    )
     is_conversation_list = any(
         re.fullmatch(
             r"(?:wechat|微信)\s*(?:[（(]\d+[）)])?",
@@ -73,6 +85,9 @@ def add_semantic_regions(
             attributes={"source": "layout", "app": "com.tencent.mm"},
         )
         return [*elements, search_region]
+
+    if has_chat_tab and has_contacts_tab:
+        return elements
 
     has_message_content = any(
         title_limit <= element.bounds[1] < height - 300

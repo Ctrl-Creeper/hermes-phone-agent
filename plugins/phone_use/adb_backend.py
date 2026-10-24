@@ -405,8 +405,8 @@ class AdbBackend(PhoneBackend):
             except (OSError, subprocess.SubprocessError) as exc:
                 logger.debug("window focus query failed: %s", exc)
                 return
-            lines = [l for l in result.stdout.splitlines() if "mCurrentFocus=" in l]
-            if not lines or any(f" {package}/" in l for l in lines):
+            lines = [line for line in result.stdout.splitlines() if "mCurrentFocus=" in line]
+            if not lines or any(f" {package}/" in line for line in lines):
                 return  # unknown format, or focus matches
             if time.monotonic() >= deadline:
                 logger.debug("window focus never reached %s; capturing anyway", package)

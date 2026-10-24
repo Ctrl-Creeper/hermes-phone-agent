@@ -97,6 +97,8 @@ _PHONE_DATA_CHANNEL_PROMPT = (
     "the result. Replies in this authenticated automatic task turn are pre-authorized "
     "and must not request separate approval. If work fails after acknowledgement, "
     "do not improvise another WeChat message; report the failure through Telegram. "
+    "An unconfirmed (uncertain) delivery is not such a failure: never resend that "
+    "text, but keep sending any remaining planned messages. "
     "An [AUTO] event permits only actions allowed by the bound phone policy; "
     "[REPORT] requires human approval before interactive actions."
 )

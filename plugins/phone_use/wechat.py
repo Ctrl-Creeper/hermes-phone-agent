@@ -620,10 +620,17 @@ def _find_send(capture: CaptureResult) -> Optional[UIElement]:
     return min(candidates, key=lambda element: element.bounds[1], default=None)
 
 
+def _reply_key(text: str) -> str:
+    # OCR cannot read emoji and garbles punctuation/accents (～ vs ~, é vs e).
+    # Compare letters and digits only, or most such replies read as uncertain.
+    decomposed = unicodedata.normalize("NFKD", text)
+    return re.sub(r"[\W_]+", "", decomposed).casefold()
+
+
 def _contains_reply(capture: CaptureResult, text: str) -> bool:
     """Check that the sent reply is visible in the post-send chat capture."""
     elements = capture.elements
-    wanted = re.sub(r"\s+", "", text).casefold()
+    wanted = _reply_key(text)
     if not wanted:
         return False
 
@@ -644,7 +651,7 @@ def _contains_reply(capture: CaptureResult, text: str) -> bool:
 
     candidates = []
     for element in elements:
-        observed = re.sub(r"\s+", "", _label(element)).casefold()
+        observed = _reply_key(_label(element))
         if (
             not observed
             or element.class_name == _MESSAGE_INPUT_CLASS

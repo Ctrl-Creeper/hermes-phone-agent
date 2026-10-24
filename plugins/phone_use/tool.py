@@ -1108,6 +1108,14 @@ def _text_response(res: ActionResult) -> str:
         payload["message"] = res.message
     if res.meta:
         payload["meta"] = res.meta
+    if res.action == "wechat_reply" and res.meta.get("delivery_status") == "uncertain":
+        # The tap happened, so this bubble most likely arrived. Without this
+        # the agent reads ok=false as a failure and drops the remaining parts.
+        payload["next_step"] = (
+            "Do not resend this text. If your reply has further distinct "
+            "messages, continue sending them, then mention the unconfirmed "
+            "delivery through Telegram."
+        )
     return json.dumps(payload)
 
 

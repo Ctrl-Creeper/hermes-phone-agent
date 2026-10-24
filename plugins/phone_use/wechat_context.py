@@ -177,6 +177,26 @@ class ImageRecoveryError(RuntimeError):
     """The caller must stop, because the original chat is not verified."""
 
 
+def _same_chat_title(observed: str, chat: str) -> bool:
+    """Confirm two chat titles name the same conversation.
+
+    Tolerant of OCR glyph confusion (capital "I" read as "l", so "AIchemy"
+    becomes "Alchemy") but not of added or dropped characters, which mean a
+    genuinely different, similarly-named chat ("Example" vs "Examples").
+    """
+    a = _normalize_chat_title(observed)
+    b = _normalize_chat_title(chat)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # A glyph swap keeps the length; an insert/delete changes it.
+    if len(a) != len(b) or len(a) < 5:
+        return False
+    diffs = sum(1 for x, y in zip(a, b) if x != y)
+    return diffs <= max(1, len(a) // 8)
+
+
 def _verified_chat(capture: CaptureResult, chat: str) -> bool:
     header = _find_chat_header(capture, chat)
     return (
@@ -185,7 +205,7 @@ def _verified_chat(capture: CaptureResult, chat: str) -> bool:
                     for marker in ("imagegallery", "imagepreview"))
         and not _is_search_page(capture)
         and header is not None
-        and _normalize_chat_title(header.text or header.content_desc or "") == _normalize_chat_title(chat)
+        and _same_chat_title(header.text or header.content_desc or "", chat)
         and any(e.class_name == "host.ocr.MessageInput" or (
             "edittext" in e.class_name.casefold() and e.bounds[1] > capture.height * 0.5
         ) for e in capture.elements)

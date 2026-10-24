@@ -4652,3 +4652,25 @@ def test_capture_waits_until_reported_app_owns_window_focus(monkeypatch):
 
     backend.capture(mode="hierarchy")
     assert events[:4] == ["focus", "focus", "focus", "shot"]
+
+
+def test_capture_survives_window_focus_query_failure(monkeypatch):
+    # The focus wait is best-effort; adb missing or timing out must not
+    # turn a capture into an error.
+    backend = AdbBackend(serial="emulator-5554")
+
+    def shell(*args, **kwargs):
+        if args[:2] == ("dumpsys", "window"):
+            raise FileNotFoundError("adb")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(backend, "_adb_shell", shell)
+    monkeypatch.setattr(backend, "_get_foreground_app",
+                        lambda: {"package": "com.tencent.mm", "activity": ".ui.LauncherUI"})
+    monkeypatch.setattr(backend, "_take_screenshot", lambda: None)
+    monkeypatch.setattr(backend, "_dump_ui_hierarchy", lambda: [])
+    monkeypatch.setattr(backend, "device_info", lambda: DeviceInfo(
+        serial="emulator-5554", model="", android_version="", sdk_version=0,
+        screen_width=1080, screen_height=2400, density=420, is_emulator=True))
+
+    assert backend.capture(mode="hierarchy").current_package == "com.tencent.mm"

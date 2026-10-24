@@ -400,7 +400,11 @@ class AdbBackend(PhoneBackend):
             return
         deadline = time.monotonic() + timeout
         while True:
-            result = self._adb_shell("dumpsys", "window")
+            try:
+                result = self._adb_shell("dumpsys", "window")
+            except (OSError, subprocess.SubprocessError) as exc:
+                logger.debug("window focus query failed: %s", exc)
+                return
             lines = [l for l in result.stdout.splitlines() if "mCurrentFocus=" in l]
             if not lines or any(f" {package}/" in l for l in lines):
                 return  # unknown format, or focus matches

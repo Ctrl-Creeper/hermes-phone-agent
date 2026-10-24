@@ -272,3 +272,92 @@ def test_recovery_relaunches_wechat_after_backing_out_of_it():
 
     assert wechat._return_to_conversation_list(Backend(), home).ok
     assert calls == [('launch_app', 'com.tencent.mm')]
+
+
+def _search_cap(elements, activity='.plugin.fts.ui.FTSMainUI'):
+    return CaptureResult(mode='hierarchy', width=1080, height=2400,
+                         current_package='com.tencent.mm',
+                         current_activity=activity, elements=elements)
+
+
+class _SearchBackend:
+    """Serves captures keyed by the last typed query."""
+
+    def __init__(self, pages, chat_page=None):
+        self.pages, self.chat_page = pages, chat_page
+        self.queries, self.taps, self.query = [], [], None
+
+    def tap(self, **kwargs):
+        self.taps.append(kwargs.get('element'))
+        return ActionResult(ok=True, action='tap')
+
+    def set_text(self, value):
+        self.queries.append(value)
+        self.query = value
+        return ActionResult(ok=True, action='set_text')
+
+    def capture(self, mode):
+        if self.query is None:
+            return _search_cap([text(1, 'Search local or internet results', (184, 135, 823, 178))])
+        if self.taps[-1] != 9 and self.chat_page is not None:
+            return self.chat_page
+        return self.pages.get(self.query, _search_cap([]))
+
+
+_LIST = _search_cap([UIElement(index=9, class_name='host.ocr.WeChatSearch',
+                               bounds=(831, 84, 972, 204))], '.ui.LauncherUI')
+
+
+def test_search_falls_back_to_a_keyword_and_matches_the_full_name():
+    # The name came from OCR ("Al" for "AI"); WeChat finds nothing for the
+    # whole string but finds the chat for one of its words.
+    keyword_page = _search_cap([text(1, 'Top Hits', (41, 292, 185, 333)),
+                                text(2, 'Al Ethos 社团（26）', (200, 420, 700, 480))])
+    chat_page = _search_cap([text(1, 'Al Ethos 社团(26)', (320, 104, 704, 157)),
+                             UIElement(index=3, class_name='host.ocr.MessageInput',
+                                       bounds=(110, 2165, 720, 2325))], '.ui.LauncherUI')
+    backend = _SearchBackend({'Ethos': keyword_page}, chat_page)
+    result = wechat._search_for_chat(backend, _LIST, 'Al Ethos 社团')
+    assert result.ok, result.message
+    assert backend.queries == ['Al Ethos 社团', 'Ethos']
+    assert backend.taps == [9, 2]
+
+
+def test_keyword_search_never_opens_a_chat_with_a_different_full_name():
+    keyword_page = _search_cap([text(1, 'Group Chats', (41, 292, 185, 333)),
+                                text(2, 'AI Ethos 社团（26）', (200, 420, 700, 480)),
+                                text(3, 'Members: Ethos fan', (200, 490, 700, 530))])
+    backend = _SearchBackend({'Ethos': keyword_page})
+    result = wechat._search_for_chat(backend, _LIST, 'AI Ethos 社团core members')
+    assert not result.ok
+    assert backend.taps == [9]
+    assert "WeChat showed: ['AI Ethos 社团']" in result.message
+
+
+def test_search_never_taps_a_web_search_suggestion():
+    web_page = _search_cap([text(1, 'Search Results', (114, 313, 384, 349)),
+                            text(2, 'Example Group', (128, 425, 415, 468))])
+    backend = _SearchBackend({'Example Group': web_page})
+    result = wechat._search_for_chat(backend, _LIST, 'Example Group')
+    assert not result.ok
+    assert backend.taps == [9]
+
+
+def test_search_never_matches_a_group_member_line():
+    page = _search_cap([text(1, 'Group Chats', (41, 292, 185, 333)),
+                        text(2, 'Study Group（9）', (200, 420, 700, 480)),
+                        text(3, 'Members: Alexandra Example', (200, 490, 700, 530))])
+    backend = _SearchBackend({'Alexandra Example': page, 'Alexandra': page, 'Example': page})
+    result = wechat._search_for_chat(backend, _LIST, 'Alexandra Example')
+    assert not result.ok
+    assert backend.taps == [9]
+
+
+def test_chat_header_is_the_title_bar_not_the_first_message_sender():
+    # A message sender just below the title bar must not count as the title.
+    chat_page = _search_cap([text(1, 'Other Group(17)', (320, 104, 704, 157)),
+                             text(2, 'Void_DRS', (201, 239, 408, 298)),
+                             UIElement(index=3, class_name='host.ocr.MessageInput',
+                                       bounds=(110, 2165, 720, 2325))], '.ui.LauncherUI')
+    assert wechat._find_chat_header(chat_page, 'Void_DRS') is None
+    assert wechat._find_chat_header(chat_page, 'Other Group') is not None

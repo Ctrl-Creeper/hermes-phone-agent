@@ -27,7 +27,10 @@ _SEARCH_RESULT_SECTIONS = frozenset({
     "official accounts", "公众号",
     "mini programs", "小程序",
     "chat history", "chat histories", "聊天记录",
+    "search results", "搜索结果",
 })
+# Group results list matching members under the group name; never a chat name.
+_MEMBER_LINE = re.compile(r"^\s*(?:members|包含|群成员|成员)\s*[:：]", re.IGNORECASE)
 _CHAT_RESULT_SECTIONS = frozenset({
     "top hits", "最佳匹配", "最常使用", "contacts", "联系人", "group chats", "群聊",
 })
@@ -180,7 +183,9 @@ def _find_chat_header(capture: CaptureResult, chat: str) -> Optional[UIElement]:
     wanted = _normalize_chat_title(chat)
     if not wanted:
         return None
-    title_limit = max(220, int(capture.height * 0.12))
+    # The title bar ends near 8.5% of the height; the first message's sender
+    # name sits just below it and must not count as the title.
+    title_limit = int(capture.height * 0.085)
     candidates = [
         element for element in capture.elements
         if element.bounds[1] < title_limit
@@ -493,6 +498,20 @@ def _find_top_hit(capture: CaptureResult) -> Optional[UIElement]:
     return min(candidates, key=lambda element: element.bounds[1], default=None)
 
 
+def _search_keywords(chat: str) -> list[str]:
+    """Words of a chat name to search when WeChat finds nothing for all of it.
+
+    Names often come from OCR'd notifications ("Al" for "AI"), so the whole
+    string can miss while one of its words still finds the chat.
+    """
+    words: list[str] = []
+    for word in re.split(r"\W+", chat):
+        long_enough = len(word) >= (3 if word.isascii() else 2)
+        if long_enough and word != chat.strip() and word not in words:
+            words.append(word)
+    return words[:2]
+
+
 def _search_for_chat(
     backend: PhoneBackend,
     capture: CaptureResult,
@@ -540,17 +559,7 @@ def _search_for_chat(
             message="WeChat search page did not become ready", capture=search_page,
         )
 
-    typed = _run_and_capture(
-        backend, "set_text", lambda: backend.set_text(query),
-    )
-    if not typed.ok or typed.capture is None:
-        return ActionResult(
-            ok=False, action="wechat_open_chat",
-            message=typed.message or "could not enter the WeChat search query",
-            capture=typed.capture,
-        )
-
-    def find_result(value: CaptureResult) -> Optional[UIElement]:
+    def chat_results(value: CaptureResult) -> tuple[list[UIElement], bool]:
         sections = sorted((e for e in value.elements
                            if _label(e).casefold() in _SEARCH_RESULT_SECTIONS),
                           key=lambda e: e.bounds[1])
@@ -565,14 +574,18 @@ def _search_for_chat(
                 preceding and _label(preceding[-1]).casefold() in _CHAT_RESULT_SECTIONS
             )
 
-        candidates = [
+        return [
             element for element in value.elements
             if element.bounds[1] >= max(220, int(value.height * 0.12))
             # The query keyboard can echo the exact chat name as a suggestion.
             and element.bounds[3] < int(value.height * .58)
+            and not _MEMBER_LINE.match(_label(element))
             and is_chat_result(element)
-        ]
-        matched = _find_text(candidates, chat)
+        ], bool(sections)
+
+    def find_result(value: CaptureResult) -> Optional[UIElement]:
+        # Always match the full requested name, even after a keyword search.
+        matched = _find_text(chat_results(value)[0], chat)
         if matched is not None:
             return matched
         if _is_symbol_only_title(chat):
@@ -590,15 +603,40 @@ def _search_for_chat(
             and _find_input(value.elements) is not None
         )
 
-    results = _settle_capture(
-        backend, typed.capture, lambda value: find_result(value) is not None,
-    )
-    target = find_result(results)
+    queries = [query]
+    if not placeholder and not _is_symbol_only_title(chat):
+        queries += _search_keywords(chat)
+    shown: list[str] = []
+    target = None
+    for attempt in queries:
+        typed = _run_and_capture(
+            backend, "set_text", lambda attempt=attempt: backend.set_text(attempt),
+        )
+        if not typed.ok or typed.capture is None:
+            return ActionResult(
+                ok=False, action="wechat_open_chat",
+                message=typed.message or "could not enter the WeChat search query",
+                capture=typed.capture,
+            )
+        results = _settle_capture(
+            backend, typed.capture, lambda value: find_result(value) is not None,
+        )
+        target = find_result(results)
+        if target is not None:
+            break
+        elements, has_sections = chat_results(results)
+        if has_sections:
+            for element in elements:
+                name = re.sub(r"\s*[（(]\d+[)）]\s*$", "", _label(element).strip())
+                if name and name not in shown:
+                    shown.append(name)
     if target is None:
+        message = f"WeChat search found no unambiguous chat {chat!r}"
+        if shown:
+            # Let the agent retry with an exact name instead of guessing one.
+            message += f"; WeChat showed: {shown[:5]}"
         return ActionResult(
-            ok=False, action="wechat_open_chat",
-            message=f"WeChat search found no unambiguous chat {chat!r}",
-            capture=results,
+            ok=False, action="wechat_open_chat", message=message, capture=results,
         )
 
     if placeholder:

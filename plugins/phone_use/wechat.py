@@ -226,6 +226,7 @@ def _find_conversation_tab(capture: CaptureResult) -> Optional[UIElement]:
     return next((
         element for element in capture.elements
         if element.bounds[1] >= min_y
+        and element.center()[0] < capture.width * .25
         and _normalize_chat_title(_label(element)) in _CONVERSATION_TAB_LABELS
     ), None)
 
@@ -285,6 +286,27 @@ def _settle_capture(
     return current
 
 
+def _retap_if_still_on_list(
+    backend: PhoneBackend,
+    capture: CaptureResult,
+    target: UIElement,
+    done: Callable[[CaptureResult], bool],
+) -> CaptureResult:
+    """Repeat a list tap once if WeChat dropped it.
+
+    Right after a cold start WeChat draws the conversation list before it
+    accepts input. A still-visible list proves the first tap was not handled.
+    """
+    if done(capture) or not _is_conversation_list(capture):
+        return capture
+    x, y = target.center()
+    logger.warning("WeChat ignored a list tap; retrying at (%d, %d)", x, y)
+    retry = _run_and_capture(backend, "tap", lambda: backend.tap(x=x, y=y))
+    if not retry.ok or retry.capture is None:
+        return capture
+    return _settle_capture(backend, retry.capture, done)
+
+
 def _return_to_conversation_list(
     backend: PhoneBackend,
     capture: CaptureResult,
@@ -304,12 +326,20 @@ def _return_to_conversation_list(
         # Prefer it over Back because Back can leave WeChat or merely dismiss
         # a keyboard without changing pages.
         conversation_tab = _find_conversation_tab(current)
-        if conversation_tab is not None:
+        if current.current_package and current.current_package != WECHAT_PACKAGE:
+            # A repeated Back can exit WeChat; Back never returns from there.
+            moved = _run_and_capture(
+                backend, "launch_app", lambda: backend.launch_app(WECHAT_PACKAGE),
+            )
+        elif conversation_tab is not None:
             moved = _run_and_capture(
                 backend, "tap",
                 lambda target=conversation_tab: backend.tap(element=target.index),
             )
-        elif current.current_activity.casefold().endswith("launcherui"):
+        elif (current.current_activity.casefold().endswith("launcherui")
+              # WeChat 8 hosts chats in LauncherUI too; there this spot is
+              # the composer's voice button, so leave a chat with Back.
+              and _find_input(current.elements) is None):
             moved = _run_and_capture(
                 backend, "tap",
                 lambda: backend.tap(
@@ -329,6 +359,11 @@ def _return_to_conversation_list(
             )
         current = moved.capture
 
+    if _is_conversation_list(current):
+        return ActionResult(
+            ok=True, action="wechat_open_chat", capture=current,
+            message="WeChat conversation list is ready",
+        )
     return ActionResult(
         ok=False, action="wechat_open_chat",
         message="could not reach the WeChat conversation list after recovery",
@@ -338,10 +373,22 @@ def _return_to_conversation_list(
 
 def _chat_is_open(capture: CaptureResult, chat: str) -> bool:
     return (
-        not _is_search_page(capture)
+        # Search screens (FTSMainUI, web search MMFTSSOSHomeWebViewUI) have a
+        # composer-like search box that echoes the chat title.
+        "fts" not in capture.current_activity.rsplit(".", 1)[-1].casefold()
+        and not _is_search_page(capture)
+        and _find_conversation_tab(capture) is None
         and _find_chat_header(capture, chat) is not None
         and _find_input(capture.elements) is not None
     )
+
+
+def _conversation_rows(capture: CaptureResult) -> list[UIElement]:
+    """Exclude header and navigation without dropping the first chat row."""
+    return [e for e in capture.elements
+            if e.bounds[1] >= max(200, int(capture.height * .085))
+            and e.bounds[3] < int(capture.height * .9)
+            and e.class_name not in {_MESSAGE_INPUT_CLASS, _SEARCH_CONTROL_CLASS}]
 
 
 def _find_label(
@@ -484,6 +531,9 @@ def _search_for_chat(
     search_page = _settle_capture(
         backend, opened_search.capture, _is_search_page,
     )
+    search_page = _retap_if_still_on_list(
+        backend, search_page, search_control, _is_search_page,
+    )
     if not _is_search_page(search_page):
         return ActionResult(
             ok=False, action="wechat_open_chat",
@@ -518,7 +568,8 @@ def _search_for_chat(
         candidates = [
             element for element in value.elements
             if element.bounds[1] >= max(220, int(value.height * 0.12))
-            and element.bounds[3] < value.height - 180
+            # The query keyboard can echo the exact chat name as a suggestion.
+            and element.bounds[3] < int(value.height * .58)
             and is_chat_result(element)
         ]
         matched = _find_text(candidates, chat)
@@ -837,7 +888,7 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
         return _search_for_chat(backend, capture, chat)
 
     input_element = _find_input(capture.elements)
-    if input_element is not None and _find_chat_header(capture, chat) is not None:
+    if _chat_is_open(capture, chat):
         return ActionResult(
             ok=True,
             action="wechat_open_chat",
@@ -848,11 +899,7 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
     # A cold/resumed LauncherUI may expose only a handful of OCR elements in
     # its first frame. Wait for enough structure to identify a chat or list.
     for _ in range(2):
-        list_elements = [
-            element for element in capture.elements
-            if element.bounds[1] >= max(220, int(capture.height * 0.12))
-            and element.bounds[3] < capture.height - 180
-        ]
+        list_elements = _conversation_rows(capture)
         if input_element is not None or _find_text(list_elements, chat) is not None:
             break
         if _is_search_page(capture) or _find_conversation_tab(capture) is not None:
@@ -865,7 +912,7 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
             logger.warning("WeChat launch settle capture failed: %s", exc)
             break
         input_element = _find_input(capture.elements)
-        if input_element is not None and _find_chat_header(capture, chat) is not None:
+        if _chat_is_open(capture, chat):
             return ActionResult(
                 ok=True,
                 action="wechat_open_chat",
@@ -883,7 +930,7 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
         else:
             capture = settled
             input_element = _find_input(capture.elements)
-            if input_element is not None and _find_chat_header(capture, chat) is not None:
+            if _chat_is_open(capture, chat):
                 return ActionResult(
                     ok=True,
                     action="wechat_open_chat",
@@ -891,11 +938,7 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
                     capture=capture,
                 )
 
-    list_elements = [
-        element for element in capture.elements
-        if element.bounds[1] >= max(220, int(capture.height * 0.12))
-        and element.bounds[3] < capture.height - 180
-    ]
+    list_elements = _conversation_rows(capture)
     target = _find_text(list_elements, chat)
     page_needs_recovery = (
         _is_search_page(capture)
@@ -910,11 +953,7 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
 
     # Only use a fresh list-row match. A message body or notification preview
     # with the same text must never be treated as a conversation target.
-    list_elements = [
-        element for element in capture.elements
-        if element.bounds[1] >= max(220, int(capture.height * 0.12))
-        and element.bounds[3] < capture.height - 180
-    ]
+    list_elements = _conversation_rows(capture)
     target = _find_text(list_elements, chat)
     if target is None:
         return _search_for_chat(backend, capture, chat)
@@ -943,6 +982,11 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
         except Exception as exc:
             logger.warning("WeChat open-chat settle capture failed: %s", exc)
             break
+    opened_capture = _retap_if_still_on_list(
+        backend, opened_capture, target,
+        lambda value: _find_chat_header(value, chat) is not None
+        and _find_input(value.elements) is not None,
+    )
     if _find_chat_header(opened_capture, chat) is None:
         return ActionResult(
             ok=False,

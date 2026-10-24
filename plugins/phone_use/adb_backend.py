@@ -270,6 +270,7 @@ class AdbBackend(PhoneBackend):
         elements: List[UIElement] = []
         used_host_ocr = False
         fg = self._get_foreground_app()
+        self._wait_for_window_focus(fg.get("package", ""))
         # WeChat normally benefits from host OCR because its hierarchy is
         # sparse, but image inspection needs ImageView nodes and therefore
         # gets a first attempt at the real accessibility hierarchy.
@@ -387,6 +388,30 @@ class AdbBackend(PhoneBackend):
         if len(m) == 2:
             return (int(m[0][0]), int(m[0][1]), int(m[1][0]), int(m[1][1]))
         return (0, 0, 0, 0)
+
+    def _wait_for_window_focus(self, package: str, timeout: float = 2.5) -> None:
+        """Wait until *package* owns window focus before taking a screenshot.
+
+        Android marks an app resumed before its first frame is drawn, so a
+        screenshot taken then shows the previous app (usually the launcher)
+        while being labelled with the new one.
+        """
+        if not package:
+            return
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                result = self._adb_shell("dumpsys", "window")
+            except (OSError, subprocess.SubprocessError) as exc:
+                logger.debug("window focus query failed: %s", exc)
+                return
+            lines = [l for l in result.stdout.splitlines() if "mCurrentFocus=" in l]
+            if not lines or any(f" {package}/" in l for l in lines):
+                return  # unknown format, or focus matches
+            if time.monotonic() >= deadline:
+                logger.debug("window focus never reached %s; capturing anyway", package)
+                return
+            time.sleep(0.2)
 
     def _get_foreground_app(self) -> Dict[str, str]:
         result = self._adb_shell(

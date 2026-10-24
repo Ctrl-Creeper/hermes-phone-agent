@@ -683,6 +683,8 @@ class PhoneEventAdapter:
         self._target_user_name = str(extra.get("telegram_user_name", "phone-agent")).strip()
         self._target_profile = str(extra.get("telegram_profile", "")).strip() or None
         self._persona_prompt = str(extra.get("persona_prompt", "")).strip()
+        self._phone_provider = str(extra.get("provider", "")).strip()
+        self._phone_model = str(extra.get("model", "")).strip()
         self._serial = str(
             extra.get("serial") or os.environ.get("ANDROID_SERIAL", "")
         ).strip() or None
@@ -1203,6 +1205,12 @@ class PhoneEventAdapter:
             return
 
         source = self._source_for_event(phone_event)
+        runner = getattr(self, "gateway_runner", None)
+        if runner is not None:
+            try:
+                self._pin_phone_model(runner, runner._session_key_for_source(source))
+            except Exception:
+                logger.exception("Could not pin phone model; using gateway default")
         message = MessageEvent(
             text=formatted,
             message_type=MessageType.TEXT,
@@ -1241,6 +1249,25 @@ class PhoneEventAdapter:
                 logger.exception("Could not track phone dispatch session")
         future.add_done_callback(self._log_dispatch_result)
         return future
+
+    def _pin_phone_model(self, runner, key: str) -> None:
+        """Route phone lanes to extra.provider/extra.model via a session override."""
+        if not (self._phone_provider and self._phone_model):
+            return
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        runtime = resolve_runtime_provider(
+            requested=self._phone_provider, target_model=self._phone_model,
+        )
+        override = {"model": self._phone_model}
+        override.update(
+            (k, runtime.get(k)) for k in ("provider", "api_key", "base_url", "api_mode")
+        )
+        overrides = runner._session_model_overrides
+        if overrides.get(key) != override:
+            overrides[key] = override
+            # Only evict on change so an unchanged lane keeps its prompt cache.
+            runner._evict_cached_agent(key)
 
     def _forget_phone_dispatch(self, future) -> None:
         with self._phone_dispatch_lock:

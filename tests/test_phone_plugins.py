@@ -4621,3 +4621,34 @@ def test_direct_report_uses_telegram_send_not_agent(monkeypatch):
     adapter._dispatch_report_to_telegram("raw notification")
 
     assert sent == [("123456789", "raw notification", None, {"notify": True})]
+
+
+def test_capture_waits_until_reported_app_owns_window_focus(monkeypatch):
+    # Android resumes WeChat before its window is drawn; a screenshot taken
+    # then still shows the launcher while being labelled as WeChat.
+    backend = AdbBackend(serial="emulator-5554")
+    focus = iter([
+        "  mCurrentFocus=null\n",
+        "  mCurrentFocus=Window{1 u0 com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity}\n",
+        "  mCurrentFocus=Window{2 u0 com.tencent.mm/com.tencent.mm.ui.LauncherUI}\n",
+    ])
+    events = []
+
+    def shell(*args, **kwargs):
+        if args[:2] == ("dumpsys", "window"):
+            events.append("focus")
+            return subprocess.CompletedProcess(args, 0, next(focus), "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(backend, "_adb_shell", shell)
+    monkeypatch.setattr(adb_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(backend, "_get_foreground_app",
+                        lambda: {"package": "com.tencent.mm", "activity": ".ui.LauncherUI"})
+    monkeypatch.setattr(backend, "_take_screenshot", lambda: events.append("shot") or None)
+    monkeypatch.setattr(backend, "_dump_ui_hierarchy", lambda: [])
+    monkeypatch.setattr(backend, "device_info", lambda: DeviceInfo(
+        serial="emulator-5554", model="", android_version="", sdk_version=0,
+        screen_width=1080, screen_height=2400, density=420, is_emulator=True))
+
+    backend.capture(mode="hierarchy")
+    assert events[:4] == ["focus", "focus", "focus", "shot"]

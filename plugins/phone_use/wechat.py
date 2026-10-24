@@ -286,6 +286,27 @@ def _settle_capture(
     return current
 
 
+def _retap_if_still_on_list(
+    backend: PhoneBackend,
+    capture: CaptureResult,
+    target: UIElement,
+    done: Callable[[CaptureResult], bool],
+) -> CaptureResult:
+    """Repeat a list tap once if WeChat dropped it.
+
+    Right after a cold start WeChat draws the conversation list before it
+    accepts input. A still-visible list proves the first tap was not handled.
+    """
+    if done(capture) or not _is_conversation_list(capture):
+        return capture
+    x, y = target.center()
+    logger.warning("WeChat ignored a list tap; retrying at (%d, %d)", x, y)
+    retry = _run_and_capture(backend, "tap", lambda: backend.tap(x=x, y=y))
+    if not retry.ok or retry.capture is None:
+        return capture
+    return _settle_capture(backend, retry.capture, done)
+
+
 def _return_to_conversation_list(
     backend: PhoneBackend,
     capture: CaptureResult,
@@ -305,12 +326,20 @@ def _return_to_conversation_list(
         # Prefer it over Back because Back can leave WeChat or merely dismiss
         # a keyboard without changing pages.
         conversation_tab = _find_conversation_tab(current)
-        if conversation_tab is not None:
+        if current.current_package and current.current_package != WECHAT_PACKAGE:
+            # A repeated Back can exit WeChat; Back never returns from there.
+            moved = _run_and_capture(
+                backend, "launch_app", lambda: backend.launch_app(WECHAT_PACKAGE),
+            )
+        elif conversation_tab is not None:
             moved = _run_and_capture(
                 backend, "tap",
                 lambda target=conversation_tab: backend.tap(element=target.index),
             )
-        elif current.current_activity.casefold().endswith("launcherui"):
+        elif (current.current_activity.casefold().endswith("launcherui")
+              # WeChat 8 hosts chats in LauncherUI too; there this spot is
+              # the composer's voice button, so leave a chat with Back.
+              and _find_input(current.elements) is None):
             moved = _run_and_capture(
                 backend, "tap",
                 lambda: backend.tap(
@@ -330,6 +359,11 @@ def _return_to_conversation_list(
             )
         current = moved.capture
 
+    if _is_conversation_list(current):
+        return ActionResult(
+            ok=True, action="wechat_open_chat", capture=current,
+            message="WeChat conversation list is ready",
+        )
     return ActionResult(
         ok=False, action="wechat_open_chat",
         message="could not reach the WeChat conversation list after recovery",
@@ -339,7 +373,10 @@ def _return_to_conversation_list(
 
 def _chat_is_open(capture: CaptureResult, chat: str) -> bool:
     return (
-        not _is_search_page(capture)
+        # Search screens (FTSMainUI, web search MMFTSSOSHomeWebViewUI) have a
+        # composer-like search box that echoes the chat title.
+        "fts" not in capture.current_activity.rsplit(".", 1)[-1].casefold()
+        and not _is_search_page(capture)
         and _find_conversation_tab(capture) is None
         and _find_chat_header(capture, chat) is not None
         and _find_input(capture.elements) is not None
@@ -493,6 +530,9 @@ def _search_for_chat(
         )
     search_page = _settle_capture(
         backend, opened_search.capture, _is_search_page,
+    )
+    search_page = _retap_if_still_on_list(
+        backend, search_page, search_control, _is_search_page,
     )
     if not _is_search_page(search_page):
         return ActionResult(
@@ -935,6 +975,11 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
         except Exception as exc:
             logger.warning("WeChat open-chat settle capture failed: %s", exc)
             break
+    opened_capture = _retap_if_still_on_list(
+        backend, opened_capture, target,
+        lambda value: _find_chat_header(value, chat) is not None
+        and _find_input(value.elements) is not None,
+    )
     if _find_chat_header(opened_capture, chat) is None:
         return ActionResult(
             ok=False,

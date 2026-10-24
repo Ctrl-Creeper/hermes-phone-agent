@@ -432,3 +432,19 @@ def test_real_hermes_source_registers_pre_dispatch_hook(tmp_path, monkeypatch):
         await asyncio.sleep(0)
     asyncio.run(exercise())
     assert phone_tool.pause_gate.snapshot()[0]
+
+
+def test_ack_falls_back_to_platform_adapter_without_adapter_for_source():
+    # Some Hermes gateways predate GatewayRunner._adapter_for_source.
+    sent = []
+
+    class Telegram:
+        async def send(self, chat_id, content, metadata=None):
+            sent.append((chat_id, content))
+
+    from enum import Enum
+    platform = Enum("Platform", {"TELEGRAM": "telegram"}).TELEGRAM
+    source = SimpleNamespace(platform=platform, chat_id="main", thread_id=None)
+    runner = SimpleNamespace(adapters={platform: Telegram()})
+    asyncio.run(control._ack(runner, source, "paused"))
+    assert sent == [("main", "paused")]

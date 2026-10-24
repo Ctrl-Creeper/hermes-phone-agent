@@ -84,6 +84,9 @@ async def _ack(gateway: Any, source: Any, text: str) -> None:
     getter = getattr(gateway, "_adapter_for_source", None)
     if callable(getter):
         adapter = getter(source)
+    else:
+        # Older/customized gateways lack _adapter_for_source.
+        adapter = (getattr(gateway, "adapters", {}) or {}).get(getattr(source, "platform", None))
     if adapter is None:
         return
     metadata = {"thread_id": str(source.thread_id)} if getattr(source, "thread_id", None) else None

@@ -2086,6 +2086,31 @@ def test_wechat_contains_reply_combines_wrapped_ocr_lines():
     assert wechat_module._contains_reply(capture, reply)
 
 
+def test_wechat_contains_reply_ignores_symbols_ocr_cannot_read():
+    # Host OCR drops emoji and normalizes fullwidth tildes/accents; a reply
+    # with them must still be confirmed instead of reported as uncertain.
+    capture = phone_tool.CaptureResult(
+        mode="hierarchy", width=1080, height=2400, elements=[UIElement(
+            index=1, class_name="host.ocr.Text",
+            text="训练 Pokemon AI 这个我看看，稍等我理一下~",
+            bounds=(300, 1500, 1010, 1565),
+        )],
+    )
+    assert wechat_module._contains_reply(
+        capture, "训练 Pokémon AI 这个我看看，稍等我理一下～😂",
+    )
+    assert not wechat_module._contains_reply(capture, "完全不同的回复")
+
+
+def test_uncertain_wechat_reply_tells_agent_to_continue_remaining_parts():
+    payload = json.loads(phone_tool._text_response(phone_tool.ActionResult(
+        ok=False, action="wechat_reply", message="delivery could not be confirmed",
+        meta={"delivery_attempted": True, "delivery_status": "uncertain"},
+    )))
+    assert "Do not resend this text" in payload["next_step"]
+    assert "continue" in payload["next_step"]
+
+
 def test_wechat_send_fallback_does_not_tap_keyboard_keys():
     from plugins.phone_use.wechat import _find_send
 

@@ -1338,8 +1338,15 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str 
 
 def reply(backend: PhoneBackend, chat: str, text: str, *, quote_text: str = '',
           quote_sender: str = '', quote_context: str = '', quote_max_pages: int = 3,
-          on_delivery: Optional[Callable[[str], None]] = None) -> ActionResult:
-    """Open a WeChat chat, recover once if needed, and always return Home."""
+          on_delivery: Optional[Callable[[str], None]] = None,
+          return_home: bool = True) -> ActionResult:
+    """Open a WeChat chat, recover once if needed, and return Home afterwards.
+
+    ``return_home`` defaults to True so standalone callers leave the phone on a
+    clean screen. A host that retains the device across a turn and does its own
+    end-of-turn Home cleanup can pass False to avoid bouncing out of the chat
+    (and re-navigating) between consecutive actions.
+    """
     result: ActionResult = ActionResult(
         ok=False, action="wechat_reply", message="WeChat reply did not run"
     )
@@ -1408,24 +1415,25 @@ def reply(backend: PhoneBackend, chat: str, text: str, *, quote_text: str = '',
     finally:
         if quote_text and not result.ok:
             result.meta['draft_may_remain'] = True
-        home = _run_and_capture(
-            backend,
-            "keyevent",
-            lambda: backend.keyevent("HOME"),
-        )
-        if "result" in locals():
-            result.capture = home.capture or result.capture
-            if not home.ok and not result.meta.get("delivery_attempted"):
-                result.ok = False
-                result.message = (
-                    f"{result.message}; could not return to Home: {home.message}"
-                )
-            elif not home.ok:
-                result.meta["home_cleanup_failed"] = True
-                result.message = (
-                    f"{result.message}; delivery was not retried after Home "
-                    f"cleanup failed: {home.message}"
-                )
+        if return_home:
+            home = _run_and_capture(
+                backend,
+                "keyevent",
+                lambda: backend.keyevent("HOME"),
+            )
+            if "result" in locals():
+                result.capture = home.capture or result.capture
+                if not home.ok and not result.meta.get("delivery_attempted"):
+                    result.ok = False
+                    result.message = (
+                        f"{result.message}; could not return to Home: {home.message}"
+                    )
+                elif not home.ok:
+                    result.meta["home_cleanup_failed"] = True
+                    result.message = (
+                        f"{result.message}; delivery was not retried after Home "
+                        f"cleanup failed: {home.message}"
+                    )
         _clear_symbol_chat_hint(chat)
 
 

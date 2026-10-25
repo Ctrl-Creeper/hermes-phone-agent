@@ -82,7 +82,7 @@ def test_durable_reply_distinguishes_quoted_originals(monkeypatch):
 def test_pre_send_failure_can_retry_but_confirmed_send_survives_turn_cleanup(monkeypatch):
     calls = []
 
-    def send(_backend, _chat, _text, on_delivery):
+    def send(_backend, _chat, _text, *, on_delivery, **_options):
         calls.append("prepare")
         if len(calls) == 1:
             return ActionResult(ok=False, action="wechat_reply", message="chat unavailable")

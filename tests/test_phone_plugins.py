@@ -4699,3 +4699,69 @@ def test_capture_survives_window_focus_query_failure(monkeypatch):
         screen_width=1080, screen_height=2400, density=420, is_emulator=True))
 
     assert backend.capture(mode="hierarchy").current_package == "com.tencent.mm"
+
+
+def test_wechat_reply_can_skip_the_per_action_home_cleanup(monkeypatch):
+    # When the turn retains the device, the per-reply HOME is wasteful — the
+    # end-of-turn cleanup handles it. return_home=False keeps us in the chat.
+    keys = []
+
+    def reply_once(backend, chat, text, **kwargs):
+        return phone_tool.ActionResult(
+            ok=True, action="wechat_reply", message="sent",
+            meta={"delivery_attempted": True, "delivery_status": "confirmed"},
+        )
+
+    class Backend:
+        def keyevent(self, keycode):
+            keys.append(keycode)
+            return phone_tool.ActionResult(ok=True, action="keyevent")
+
+        def capture(self, mode):
+            return phone_tool.CaptureResult(mode=mode, width=1080, height=2400)
+
+    monkeypatch.setattr(wechat_module, "_reply_once", reply_once)
+    result = wechat_module.reply(Backend(), "群聊", "你好", return_home=False)
+    assert result.ok is True
+    assert "HOME" not in keys  # stayed in the chat for the next action
+
+
+def test_wechat_reply_defaults_to_returning_home(monkeypatch):
+    keys = []
+
+    def reply_once(backend, chat, text, **kwargs):
+        return phone_tool.ActionResult(
+            ok=True, action="wechat_reply", message="sent",
+            meta={"delivery_attempted": True, "delivery_status": "confirmed"},
+        )
+
+    class Backend:
+        def keyevent(self, keycode):
+            keys.append(keycode)
+            return phone_tool.ActionResult(ok=True, action="keyevent")
+
+        def capture(self, mode):
+            return phone_tool.CaptureResult(mode=mode, width=1080, height=2400)
+
+    monkeypatch.setattr(wechat_module, "_reply_once", reply_once)
+    wechat_module.reply(Backend(), "群聊", "你好")
+    assert keys == ["HOME"]
+
+
+def test_durable_trusted_reply_skips_per_action_home(monkeypatch, tmp_path):
+    # The trusted-auto durable path retains device ownership across tool calls,
+    # so it must not bounce HOME after each reply.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    captured = {}
+
+    def fake_reply(backend, chat, text, **kwargs):
+        captured.update(kwargs)
+        return phone_tool.ActionResult(
+            ok=True, action="wechat_reply", message="sent",
+            meta={"delivery_attempted": True, "delivery_status": "confirmed"},
+        )
+
+    monkeypatch.setattr(phone_tool, "reply_to_wechat", fake_reply)
+    monkeypatch.setattr(phone_tool, "_resolve_android_serial", lambda: "emulator-5554")
+    phone_tool._durable_wechat_reply(object(), {"chat": "群聊", "text": "你好"}, "identity-hash")
+    assert captured.get("return_home") is False

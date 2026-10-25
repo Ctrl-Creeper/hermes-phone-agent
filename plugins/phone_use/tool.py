@@ -741,8 +741,11 @@ def _durable_wechat_reply(backend, args, identity: str) -> str:
             })
         receipt.record("prepared")
         try:
+            # The trusted-auto turn retains the device and runs its own
+            # end-of-turn Home cleanup, so skip the per-reply HOME that would
+            # otherwise force a re-navigation before the next action.
             result = reply_to_wechat(backend, chat, text, on_delivery=receipt.record,
-                                     **quote_options)
+                                     return_home=False, **quote_options)
         except Exception as exc:
             state = receipt.state
             if state == "prepared":

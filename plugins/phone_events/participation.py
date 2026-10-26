@@ -39,6 +39,10 @@ class ParticipationSettings:
     max_messages: int = 64
     # Group titles to classify as groups when WeChat omits isGroupConversation.
     titles: tuple[str, ...] = ()
+    # Owner-set 0..1 inclination to reply to uninvited batches: 0 holds them
+    # until an invitation, 1 answers every batch. Optional per-title overrides.
+    reply_tendency: float = 0.5
+    reply_tendencies: tuple[tuple[str, float], ...] = ()
 
     @classmethod
     def from_config(cls, raw: Any, *, conversation_type: str = 'group') -> ParticipationSettings:
@@ -79,12 +83,39 @@ class ParticipationSettings:
         if (not isinstance(titles, list) or (titles and conversation_type != 'group')
                 or any(not isinstance(t, str) or not t.strip() for t in titles)):
             raise ValueError(f'{label}.titles must list group conversation titles')
+        tendency, tendencies = _parse_reply_tendency(raw.get('reply_tendency', defaults.reply_tendency),
+                                                     label, conversation_type)
         return cls(enabled=True, conversation_type=conversation_type, mention_names=tuple(n.strip().lstrip('@') for n in names),
-                   max_messages=count, titles=tuple(t.strip() for t in titles), **values)
+                   max_messages=count, titles=tuple(t.strip() for t in titles),
+                   reply_tendency=tendency, reply_tendencies=tendencies, **values)
+
+    def tendency_for(self, title: str) -> float:
+        key = title.strip().casefold()
+        return next((v for t, v in self.reply_tendencies if t == key), self.reply_tendency)
 
     def is_invited(self, text: str) -> bool:
         return self.conversation_type == 'private' or any(re.search(r'@' + re.escape(name) + r'(?![\w])', text, re.IGNORECASE)
                    for name in self.mention_names)
+
+
+def _tendency_value(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+        raise ValueError(f'{label}.reply_tendency values must be numbers from 0 to 1')
+    return float(value)
+
+
+def _parse_reply_tendency(raw: Any, label: str, conversation_type: str):
+    """Accept ``0.6`` or ``{default: 0.4, "Group title": 0.8}``."""
+    if isinstance(raw, dict):
+        if conversation_type != 'group':
+            raise ValueError(f'{label}.reply_tendency per-title values are group-only')
+        default = _tendency_value(raw.get('default', 0.5), label)
+        overrides = tuple((str(t).strip().casefold(), _tendency_value(v, label))
+                          for t, v in raw.items() if t != 'default')
+        if any(not t for t, _ in overrides):
+            raise ValueError(f'{label}.reply_tendency titles must be non-empty')
+        return default, overrides
+    return _tendency_value(raw, label), ()
 
 
 @dataclass
@@ -97,6 +128,7 @@ class ConversationBatch:
     replied: bool = False
     sends: int = 0
     conversation_type: str = 'group'
+    reply_tendency: float = 0.5
     # Kept only for host policy revalidation, never formatted into model input.
     policy_inputs: tuple[dict[str, str], ...] = field(default=(), repr=False)
 
@@ -210,6 +242,9 @@ class ConversationParticipation:
             return
         loop = asyncio.get_running_loop()
         invited = any(observation.invited for observation in state.pending)
+        if (not invited and self.settings.conversation_type == 'group'
+                and self.settings.tendency_for(state.title) <= 0):
+            return  # Hold uninvited chatter (bounded by max_messages) as context for the next invitation.
         if invited and self.settings.conversation_type == 'group':
             due = min(state.first_at + .25, state.last_at + self.settings.quiet_seconds)
         else:
@@ -230,6 +265,7 @@ class ConversationParticipation:
         pending, state.pending = state.pending, []
         batch = ConversationBatch(
             lane=lane, conversation_type=self.settings.conversation_type, events=tuple(o.event for o in pending),
+            reply_tendency=self.settings.tendency_for(state.title),
             decisions=tuple(o.decision for o in pending),
             invited=any(o.invited for o in pending),
             policy_inputs=tuple(o.policy_input for o in pending),

@@ -116,10 +116,14 @@ _GROUP_PARTICIPATION_PROMPT = (
     "Each batch includes invitation, observed discussion pace and recent reply "
     "counts. Decide the value of speaking while composing your response in this "
     "same turn; do not run another classifier. A direct invitation deserves a "
-    "response. Without one, join only with a useful new contribution or a fitting "
-    "brief social response. Avoid repeating others, interrupting a dialogue, "
-    "answering every question mark or dominating the discussion. If there is "
-    "nothing worth adding, return exactly NO_REPLY without using any tools. "
+    "response. Without one, follow the owner's reply tendency stated in the "
+    "batch, from 0 to 1. At 1, reply once to every batch and never return "
+    "NO_REPLY. Higher values mean joining more readily, including brief social "
+    "replies and reactions; lower values mean replying only with a clearly "
+    "useful new contribution, a question to everyone or a topic about you. "
+    "Respond to the batch as a whole, not to every message in it. Avoid "
+    "repeating others or dominating the discussion. When you choose silence, "
+    "return exactly NO_REPLY without using any tools. "
     "Notifications can be incomplete, cumulative or truncated. Ordinary "
     "participation must use the observed context and must not inspect the phone "
     "or search just to decide whether to speak. Explicitly invited tasks may use "
@@ -1008,6 +1012,8 @@ class PhoneEventAdapter:
             f"[AUTO] [TASK_SOURCE] WeChat {batch.conversation_type} notification batch",
             f"Destination: {_wrap_phone_data(batch.destination)}",
             f"Direct invitation: {batch.invited}",
+            *([f"Reply tendency (0 = only when invited, 1 = reply to every batch): {batch.reply_tendency:g}"]
+              if batch.conversation_type == "group" else []),
             f"Observed metrics (notifications are incomplete): {json.dumps(batch.metrics)}",
             "Host policy instructions:",
             *dict.fromkeys(d.notes for d in decisions if d.notes),

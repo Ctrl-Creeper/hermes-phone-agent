@@ -678,3 +678,48 @@ def test_turn_send_cap_blocks_after_split_messages():
             assert guard_conversation_tool('phone_use', args) is None
             record_conversation_reply('phone_use', args, sent)
         assert guard_conversation_tool('phone_use', args)['action'] == 'block'
+
+
+def test_reply_tendency_config_accepts_number_or_per_title_mapping():
+    base = {'enabled': True, 'mention_names': ['me']}
+    assert ParticipationSettings.from_config(base).reply_tendency == .5
+    one = ParticipationSettings.from_config({**base, 'reply_tendency': 1})
+    assert one.tendency_for('Any') == 1
+    mapped = ParticipationSettings.from_config({**base, 'reply_tendency': {'default': .2, '学习小组 Study': .9}})
+    assert mapped.tendency_for(' 学习小组 study ') == .9 and mapped.tendency_for('Other') == .2
+    for bad in (1.5, -0.1, True, 'high', {'default': 2}):
+        with pytest.raises(ValueError):
+            ParticipationSettings.from_config({**base, 'reply_tendency': bad})
+
+
+def test_zero_reply_tendency_holds_chatter_until_invited():
+    async def scenario():
+        batches, ready = [], asyncio.Event()
+        async def dispatch(batch):
+            batches.append(batch)
+            ready.set()
+        scheduler = ConversationParticipation(settings(reply_tendency=0.0), dispatch)
+        scheduler.observe('A', event('chatter'), SimpleNamespace())
+        await asyncio.sleep(.15)
+        assert batches == []
+        scheduler.observe('A', event('@agent look', timestamp=2), SimpleNamespace())
+        await asyncio.wait_for(ready.wait(), 1)
+        scheduler.close()
+        assert [e.body for e in batches[0].events] == ['chatter', '@agent look']
+        assert batches[0].invited and batches[0].reply_tendency == 0
+    asyncio.run(scenario())
+
+
+def test_batch_carries_per_title_reply_tendency():
+    async def scenario():
+        batches, ready = [], asyncio.Event()
+        async def dispatch(batch):
+            batches.append(batch)
+            ready.set()
+        scheduler = ConversationParticipation(
+            settings(reply_tendencies=(('group a', 1.0),)), dispatch)
+        scheduler.observe('A', event('hi'), SimpleNamespace())
+        await asyncio.wait_for(ready.wait(), 1)
+        scheduler.close()
+        assert batches[0].reply_tendency == 1.0
+    asyncio.run(scenario())

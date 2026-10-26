@@ -4,6 +4,7 @@ No model, Telegram, ADB or real WeChat messages. Run with this repo and an
 installed Hermes on PYTHONPATH, using the Hermes Python environment.
 """
 import asyncio
+import hashlib
 import os
 import sys
 import tempfile
@@ -104,7 +105,9 @@ async def check():
         owner._on_raw_event(PhoneEvent('notification', package='com.tencent.mm',
             title=chat, body=text, timestamp=timestamp,
             meta={'conversation_type': kind, 'conversation_title': chat,
-                  'notification_key': chat, '_transport': 'helper_socket'}))
+                  # Mirrors the helper: sha256(package:type:title)[:20].
+                  'notification_key': hashlib.sha256(f'com.tencent.mm:{kind}:{chat}'.encode()).hexdigest()[:20],
+                  '_transport': 'helper_socket'}))
     try:
         notify('Group A', '@agent first', 1)
         await asyncio.wait_for(started_a.wait(), 5)
@@ -123,7 +126,7 @@ async def check():
         assert seen[0][0] != seen[1][0]
         assert seen[0][0] == seen[2][0]
         assert sends == [('Group B', 'offline answer'), ('Group A', 'offline answer')]
-        # Same name/key as Group A, but private history and receipts stay separate.
+        # Same name as Group A; the helper's type-scoped key keeps private history separate.
         notify('Group A', 'private request', 4, kind='private')
         notify('Group A', 'extra detail', 5, kind='private')
         await asyncio.wait_for(private_done.wait(), 5)

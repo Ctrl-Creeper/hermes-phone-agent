@@ -22,6 +22,8 @@ from .redact import redact_sensitive, truncate_notification_body
 
 logger = logging.getLogger(__name__)
 
+_UNREAD_PREFIX = re.compile(r'^\[\d+(?:条)?\]')
+
 
 @dataclass(frozen=True)
 class ParticipationSettings:
@@ -178,7 +180,8 @@ class ConversationParticipation:
         state.previous_lines = lines
         if not delta:
             return True
-        new_body = '\n'.join(delta)
+        # WeChat prefixes unread counts ('[5]Name: text'); they are not message content.
+        new_body = '\n'.join(_UNREAD_PREFIX.sub('', line) for line in delta)
         invited = self.settings.is_invited(new_body)
         observed = replace(event, body=truncate_notification_body(
             redact_sensitive(new_body, enable_otp=self._redact_otp)), meta=dict(event.meta))

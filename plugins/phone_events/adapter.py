@@ -384,9 +384,9 @@ def _conversation_lane(phone_event: Any) -> tuple[str, str]:
         display = f"WeChat: {title}" if title else "WeChat (unknown conversation)"
     else:
         display = f"{package}: {title}" if title else f"{package} (unknown conversation)"
-    batch = meta.get("_participation_batch")
-    lane = batch.lane if isinstance(batch, ConversationBatch) else f"phone-{digest}"
-    return lane, display
+    # Batched turns keep the conversation's existing session so instructions
+    # given before participation was enabled stay in its model history.
+    return f"phone-{digest}", display
 
 
 def _wrap_phone_data(text: str) -> str:

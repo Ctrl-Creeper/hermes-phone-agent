@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from plugins.phone_events.event_filter import PhoneEvent
-from plugins.phone_events.participation import ConversationParticipation, ParticipationSettings
+from plugins.phone_events.participation import ConversationBatch, ConversationParticipation, ParticipationSettings
 
 
 def event(body, *, chat='Group A', timestamp=1):
@@ -642,3 +642,26 @@ def test_titles_config_is_group_only():
         {'enabled': True, 'mention_names': ['me'], 'titles': ['G']}).titles == ('G',)
     with pytest.raises(ValueError):
         ParticipationSettings.from_config({'enabled': True, 'titles': ['G']}, conversation_type='private')
+
+
+def test_unread_count_prefix_is_not_model_content():
+    async def scenario():
+        batches, ready = [], asyncio.Event()
+        async def dispatch(batch):
+            batches.append(batch)
+            ready.set()
+        scheduler = ConversationParticipation(settings(), dispatch)
+        scheduler.observe('A', event('[5]Al(OH)3: ？'), SimpleNamespace())
+        await asyncio.wait_for(ready.wait(), 1)
+        scheduler.close()
+        assert [e.body for e in batches[0].events] == ['Al(OH)3: ？']
+    asyncio.run(scenario())
+
+
+def test_batched_turn_keeps_conversation_session_lane():
+    from plugins.phone_events import adapter
+    plain = event('hi')
+    batched = event('hi')
+    batched.meta['_participation_batch'] = ConversationBatch(
+        lane='group-x', events=(plain,), decisions=(), invited=False, metrics={})
+    assert adapter._conversation_lane(batched)[0] == adapter._conversation_lane(plain)[0]

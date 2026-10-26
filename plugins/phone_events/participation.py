@@ -127,6 +127,45 @@ def _parse_reply_tendency(raw: Any, label: str, conversation_type: str):
     return _tendency_value(raw, label), ()
 
 
+class KnownGroups:
+    """WeChat chat titles seen as groups, persisted across restarts.
+
+    Group notifications without a "Sender: text" body ("X recalled a
+    message") must not fall back to the unmentioned-is-private heuristic.
+    """
+
+    _LIMIT = 1024
+
+    def __init__(self, path: Any = None) -> None:
+        self._path = path
+        self._titles: OrderedDict[str, None] = OrderedDict()
+        try:
+            if path is not None and path.exists():
+                self._titles.update((t, None) for t in json.loads(path.read_text(encoding='utf-8'))
+                                    if isinstance(t, str))
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning('Ignoring unreadable known WeChat groups: %s', exc)
+
+    def __contains__(self, title: str) -> bool:
+        return title in self._titles
+
+    def add(self, title: str) -> None:
+        if not title or title in self._titles:
+            return
+        self._titles[title] = None
+        while len(self._titles) > self._LIMIT:
+            self._titles.popitem(last=False)
+        if self._path is None:
+            return
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix('.tmp')
+            tmp.write_text(json.dumps(list(self._titles), ensure_ascii=False), encoding='utf-8')
+            tmp.replace(self._path)
+        except OSError as exc:
+            logger.warning('Could not persist known WeChat groups: %s', exc)
+
+
 class HotReplyTendency:
     """Read group_participation.reply_tendency from config.yaml when it changes.
 

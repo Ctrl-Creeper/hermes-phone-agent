@@ -260,19 +260,29 @@ def test_conversation_buffer_does_not_override_phone_policy(monkeypatch, behavio
     asyncio.run(scenario())
 
 
-def test_unknown_notification_is_not_inferred_private_when_participation_enabled(monkeypatch):
-    from plugins.phone_events import adapter
+def test_unprefixed_notification_from_a_known_group_is_not_inferred_private(monkeypatch):
+    # "X recalled a message" has no sender prefix; once the chat was seen as a
+    # group it must not fall back to the unmentioned-is-private heuristic.
     from plugins.phone_use.policy import PolicyDecision
     observed = []
     policy = SimpleNamespace(evaluate_event=lambda **kw: (
         observed.append(kw['conversation_type']) or PolicyDecision(behavior='ignore')))
     async def scenario():
         owner = make_owner(monkeypatch, None, policy=policy)
-        unknown = event('chatter')
-        unknown.meta['conversation_type'] = 'unknown'
-        owner._on_raw_event(unknown)
+        for body in ('"Bob" recalled a message', 'Alice: hi', '"Bob" recalled a message',
+                     'Carol mentioned you in a group chat.'):
+            incoming = event(body, chat='Group A' if 'Carol' not in body else 'Group C')
+            incoming.meta['conversation_type'] = 'unknown'
+            owner._on_raw_event(incoming)
     asyncio.run(scenario())
-    assert observed == ['unknown']
+    assert observed == ['private', 'group', 'group', 'group']
+
+
+def test_known_groups_persist(tmp_path):
+    from plugins.phone_events.participation import KnownGroups
+    path = tmp_path / 'known.json'
+    KnownGroups(path).add('group a')
+    assert 'group a' in KnownGroups(path)
 
 
 @pytest.mark.parametrize('kind', ['group', 'private'])
@@ -522,24 +532,30 @@ def test_adapter_private_and_group_notifications_use_separate_shared_scheduler_l
     asyncio.run(scenario())
 
 
-def test_unknown_as_private_inference_needs_listed_titles_for_group_participation(monkeypatch):
-    # Muted-groups contract: unmentioned unknown notifications are DMs unless
-    # group participation is enabled without naming its unmuted groups.
+def test_group_participation_detects_unflagged_groups_by_sender_prefix(monkeypatch):
+    # WeChat omits isGroupConversation: "Sender: text" from someone other than
+    # the chat title is a group; the rest stays under the muted-groups contract.
     from plugins.phone_use.policy import PolicyDecision
     observed = []
     policy = SimpleNamespace(evaluate_event=lambda **kw: (
         observed.append(kw['conversation_type']) or PolicyDecision(behavior='ignore')))
     private = ParticipationSettings.from_config({'enabled': True}, conversation_type='private')
     async def scenario():
-        for group in (ParticipationSettings(), settings(), settings(titles=('Other',))):
+        for group, body, chat in (
+            (settings(), 'Alice: hi', 'Group A'),          # group chatter
+            (settings(), '[3]Alice: hi', 'Group A'),       # with unread count
+            (settings(), 'hello there', 'Bob'),            # DM, no prefix
+            (settings(), 'Bob: [Sticker]', 'Bob'),         # DM prefixed by the contact
+            (ParticipationSettings(), 'Alice: hi', 'Group A'),  # participation off: unchanged
+        ):
             owner = make_owner(monkeypatch, None, policy=policy)
             owner._group_settings = group
             owner._private_settings = private
-            incoming = event('unknown')
+            incoming = event(body, chat=chat)
             incoming.meta['conversation_type'] = 'unknown'
             owner._on_raw_event(incoming)
     asyncio.run(scenario())
-    assert observed == ['private', 'unknown', 'private']
+    assert observed == ['group', 'group', 'private', 'private', 'private']
 
 
 def test_running_private_turn_does_not_block_group_and_new_private_messages_wait(monkeypatch):

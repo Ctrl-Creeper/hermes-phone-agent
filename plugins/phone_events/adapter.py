@@ -30,7 +30,8 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from .participation import (
-    ConversationBatch, ConversationParticipation, ParticipationSettings, bind_conversation_turn,
+    ConversationBatch, ConversationParticipation, HotReplyTendency, ParticipationSettings,
+    bind_conversation_turn,
 )
 
 logger = logging.getLogger(__name__)
@@ -974,8 +975,16 @@ class PhoneEventAdapter:
         attribute = f"_{kind}_participation"
         scheduler = getattr(self, attribute, None)
         if scheduler is None:
+            tendency = None
+            if kind == "group":
+                try:
+                    from hermes_constants import get_hermes_home
+                    tendency = HotReplyTendency(get_hermes_home() / "config.yaml", settings)
+                except ImportError:
+                    pass  # Outside Hermes: the startup value applies.
             scheduler = ConversationParticipation(
-                settings, self._dispatch_participation_batch, redact_otp=self._redact_otp)
+                settings, self._dispatch_participation_batch, redact_otp=self._redact_otp,
+                tendency=tendency)
             setattr(self, attribute, scheduler)
         lane, _ = _conversation_lane(event)
         lane = f"{kind}-{lane}"

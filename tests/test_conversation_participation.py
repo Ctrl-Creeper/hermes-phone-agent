@@ -723,3 +723,34 @@ def test_batch_carries_per_title_reply_tendency():
         scheduler.close()
         assert batches[0].reply_tendency == 1.0
     asyncio.run(scenario())
+
+
+def test_reply_tendency_hot_reloads_and_keeps_last_good(tmp_path):
+    import os
+    from plugins.phone_events.participation import HotReplyTendency
+    config = tmp_path / 'config.yaml'
+    def write(body, tick):
+        config.write_text(body, encoding='utf-8')
+        os.utime(config, (tick, tick))
+    tendency = HotReplyTendency(config, settings())
+    write('platforms:\n  phone_events:\n    extra:\n      group_participation:\n'
+          '        reply_tendency: {default: 0.2, "Group A": 0.8}\n', 1)
+    assert tendency('Group A') == .8 and tendency('Other') == .2
+    write('platforms:\n  phone_events:\n    extra:\n      group_participation:\n'
+          '        reply_tendency: 1\n', 2)
+    assert tendency('Group A') == 1
+    write('platforms:\n  phone_events:\n    extra:\n      group_participation:\n'
+          '        reply_tendency: 7\n', 3)
+    assert tendency('Group A') == 1  # invalid edit keeps the last good value
+
+
+def test_held_zero_tendency_lanes_do_not_block_new_invitations():
+    async def scenario():
+        async def dispatch(batch):
+            pass
+        scheduler = ConversationParticipation(settings(reply_tendency=0.0), dispatch)
+        for i in range(128):
+            assert scheduler.observe(f'L{i}', event('chatter', chat=f'G{i}'), SimpleNamespace())
+        assert scheduler.observe('new', event('@agent hi', chat='New'), SimpleNamespace())
+        scheduler.close()
+    asyncio.run(scenario())

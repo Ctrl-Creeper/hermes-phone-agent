@@ -118,6 +118,40 @@ def _parse_reply_tendency(raw: Any, label: str, conversation_type: str):
     return _tendency_value(raw, label), ()
 
 
+class HotReplyTendency:
+    """Read group_participation.reply_tendency from config.yaml when it changes.
+
+    Lets the owner retune groups without a gateway restart. An unreadable or
+    invalid edit keeps the last good values.
+    """
+
+    def __init__(self, path: Any, fallback: ParticipationSettings) -> None:
+        self._path = path
+        self._mtime: float | None = None
+        self._values = (fallback.reply_tendency, fallback.reply_tendencies)
+
+    def __call__(self, title: str) -> float:
+        try:
+            mtime = self._path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime is not None and mtime != self._mtime:
+            self._mtime = mtime
+            try:
+                import yaml
+                raw = yaml.safe_load(self._path.read_text(encoding='utf-8')) or {}
+                group = (((raw.get('platforms') or {}).get('phone_events') or {})
+                         .get('extra') or {}).get('group_participation') or {}
+                if 'reply_tendency' in group:
+                    self._values = _parse_reply_tendency(
+                        group['reply_tendency'], 'group_participation', 'group')
+            except Exception as exc:
+                logger.warning('Keeping previous reply_tendency; config reload failed: %s', exc)
+        default, overrides = self._values
+        key = title.strip().casefold()
+        return next((v for t, v in overrides if t == key), default)
+
+
 @dataclass
 class ConversationBatch:
     lane: str
@@ -163,9 +197,11 @@ class _Lane:
 
 class ConversationParticipation:
     def __init__(self, settings: ParticipationSettings,
-                 dispatch: Callable[[ConversationBatch], Awaitable[None]], *, redact_otp: bool = True) -> None:
+                 dispatch: Callable[[ConversationBatch], Awaitable[None]], *, redact_otp: bool = True,
+                 tendency: Callable[[str], float] | None = None) -> None:
         self._redact_otp = redact_otp
         self.settings = settings
+        self._tendency = tendency or settings.tendency_for
         self._dispatch = dispatch
         self._lanes: dict[str, _Lane] = {}
         self._closed = False
@@ -179,9 +215,11 @@ class ConversationParticipation:
         state = self._lanes.get(lane)
         if state is None:
             if len(self._lanes) >= 128:
-                # Evict only idle lanes, never running or pending work.
+                # Evict idle lanes, including chatter held at reply_tendency 0;
+                # never running, scheduled or invited work.
                 idle = next((k for k, s in self._lanes.items()
-                             if not s.pending and s.running is None), None)
+                             if s.running is None and s.timer is None
+                             and not any(o.invited for o in s.pending)), None)
                 if idle is None:
                     logger.warning('Conversation participation capacity reached; observation not admitted')
                     return False
@@ -243,7 +281,7 @@ class ConversationParticipation:
         loop = asyncio.get_running_loop()
         invited = any(observation.invited for observation in state.pending)
         if (not invited and self.settings.conversation_type == 'group'
-                and self.settings.tendency_for(state.title) <= 0):
+                and self._tendency(state.title) <= 0):
             return  # Hold uninvited chatter (bounded by max_messages) as context for the next invitation.
         if invited and self.settings.conversation_type == 'group':
             due = min(state.first_at + .25, state.last_at + self.settings.quiet_seconds)
@@ -265,7 +303,7 @@ class ConversationParticipation:
         pending, state.pending = state.pending, []
         batch = ConversationBatch(
             lane=lane, conversation_type=self.settings.conversation_type, events=tuple(o.event for o in pending),
-            reply_tendency=self.settings.tendency_for(state.title),
+            reply_tendency=self._tendency(state.title),
             decisions=tuple(o.decision for o in pending),
             invited=any(o.invited for o in pending),
             policy_inputs=tuple(o.policy_input for o in pending),

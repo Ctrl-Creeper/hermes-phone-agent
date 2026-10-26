@@ -665,3 +665,16 @@ def test_batched_turn_keeps_conversation_session_lane():
     batched.meta['_participation_batch'] = ConversationBatch(
         lane='group-x', events=(plain,), decisions=(), invited=False, metrics={})
     assert adapter._conversation_lane(batched)[0] == adapter._conversation_lane(plain)[0]
+
+
+def test_turn_send_cap_blocks_after_split_messages():
+    from plugins.phone_events.participation import (
+        MAX_SENDS_PER_TURN, bind_conversation_turn, guard_conversation_tool, record_conversation_reply)
+    batch = ConversationBatch(lane='x', events=(event('hi'),), decisions=(), invited=False, metrics={})
+    args = {'action': 'wechat_reply', 'chat': 'Group A', 'text': 'a'}
+    sent = '{"ok": true, "meta": {"delivery_attempted": true}}'
+    with bind_conversation_turn(batch):
+        for _ in range(MAX_SENDS_PER_TURN):
+            assert guard_conversation_tool('phone_use', args) is None
+            record_conversation_reply('phone_use', args, sent)
+        assert guard_conversation_tool('phone_use', args)['action'] == 'block'

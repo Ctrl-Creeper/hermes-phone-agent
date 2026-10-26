@@ -22,6 +22,9 @@ from .redact import redact_sensitive, truncate_notification_body
 
 logger = logging.getLogger(__name__)
 
+# A reply may be split into a few messages; more is a runaway turn.
+MAX_SENDS_PER_TURN = 3
+
 _UNREAD_PREFIX = re.compile(r'^\[\d+(?:条)?\]')
 
 
@@ -92,6 +95,7 @@ class ConversationBatch:
     invited: bool
     metrics: dict[str, Any]
     replied: bool = False
+    sends: int = 0
     conversation_type: str = 'group'
     # Kept only for host policy revalidation, never formatted into model input.
     policy_inputs: tuple[dict[str, str], ...] = field(default=(), repr=False)
@@ -286,6 +290,9 @@ def guard_conversation_tool(tool_name: str, args: dict | None = None, **kwargs):
             return None
     elif tool_name == 'phone_use':
         action = args.get('action')
+        if action == 'wechat_reply' and batch.sends >= MAX_SENDS_PER_TURN:
+            return {'action': 'block', 'message': (
+                f'This turn already sent {MAX_SENDS_PER_TURN} messages; finish without sending more.')}
         allowed = action == 'wechat_reply' or (batch.invited and action == 'wechat_collect_context')
         target = args.get('chat')
         if allowed and isinstance(target, str) and target.strip() == batch.destination:
@@ -313,3 +320,4 @@ def record_conversation_reply(tool_name: str, args: dict | None = None, result: 
     meta = result.get('meta') if isinstance(result, dict) else None
     if isinstance(meta, dict) and meta.get('delivery_attempted') and not meta.get('duplicate_suppressed'):
         batch.replied = True
+        batch.sends += 1

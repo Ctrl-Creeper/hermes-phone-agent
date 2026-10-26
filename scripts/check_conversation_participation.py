@@ -105,8 +105,8 @@ async def check():
         owner._on_raw_event(PhoneEvent('notification', package='com.tencent.mm',
             title=chat, body=text, timestamp=timestamp,
             meta={'conversation_type': kind, 'conversation_title': chat,
-                  # Mirrors the helper: sha256(package:type:title)[:20].
-                  'notification_key': hashlib.sha256(f'com.tencent.mm:{kind}:{chat}'.encode()).hexdigest()[:20],
+                  # Android sbn.key: WeChat posts one notification id per conversation.
+                  'notification_key': f"0|com.tencent.mm|{int(hashlib.sha256(f'{kind}:{chat}'.encode()).hexdigest()[:7], 16)}|null|10224",
                   '_transport': 'helper_socket'}))
     try:
         notify('Group A', '@agent first', 1)
@@ -126,7 +126,7 @@ async def check():
         assert seen[0][0] != seen[1][0]
         assert seen[0][0] == seen[2][0]
         assert sends == [('Group B', 'offline answer'), ('Group A', 'offline answer')]
-        # Same name as Group A; the helper's type-scoped key keeps private history separate.
+        # Same title as Group A, but a different conversation and notification id.
         notify('Group A', 'private request', 4, kind='private')
         notify('Group A', 'extra detail', 5, kind='private')
         await asyncio.wait_for(private_done.wait(), 5)

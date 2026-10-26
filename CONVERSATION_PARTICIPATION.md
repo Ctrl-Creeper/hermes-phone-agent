@@ -21,6 +21,10 @@ platforms:
       group_participation:
         enabled: true
         mention_names: ["YourBot"]  # Your actual WeChat @mention name(s), without @
+        titles: ["Unmuted Group"]  # See "Group classification" below
+        reply_tendency:            # 0 = only when invited, 1 = every batch; hot-reloaded
+          default: 0.5
+          "Unmuted Group": 0.8
         quiet_seconds: 2
         max_wait_seconds: 8
         min_interval_seconds: 30
@@ -79,8 +83,9 @@ rule. It is independent of the group rule above:
     priority: 29
 ```
 
-Restart the gateway after changing `config.yaml`; phone policy rules retain their
-existing hot-reload behavior. Buffered tasks are rechecked against the original
+Restart the gateway after changing `config.yaml`, except for `reply_tendency`,
+which is re-read when the file changes (an invalid edit keeps the last good
+value); phone policy rules retain their existing hot-reload behavior. Buffered tasks are rechecked against the original
 authenticated payload before dispatch; only sanitized, truncated deltas reach
 the model. This PR does not change your running installation.
 
@@ -112,11 +117,30 @@ the model. This PR does not change your running installation.
   turns may collect their own chat's context and perform web research under
   the existing task policy. Private turns normally respond but may return
   `NO_REPLY` for thanks, a closing acknowledgement or an already resolved exchange.
+- **Reply tendency:** each group batch states the owner's `reply_tendency`
+  (0 to 1, globally or per group title) and the configured mention. At `0`,
+  uninvited chatter is held without a model call (bounded by `max_messages`)
+  and reaches the model only with the next invitation; at `1` the model is told
+  to reply to every batch. Values in between steer the same-turn judgement.
+  Batching and timing are unchanged. Asked to read history, view images or
+  research without an invitation, the agent replies that it needs an @ first.
+
+When a turn chooses `NO_REPLY`, its observations stay open: they lead the next
+batch, marked as earlier context the model ignores if the topic moved on. The
+carry clears after a reply, after five minutes without notifications in that
+conversation, or when a turn fails or is rejected, and never pushes a batch past
+`max_messages`.
+
+A reply may be split into up to three short messages, one `wechat_reply` call
+each. Follow-up calls in the same retained turn reuse the chat the previous
+confirmed reply left open (re-verified on screen, single use, two-minute TTL)
+instead of searching again. The turn guard blocks a fourth send.
 
 Each private or group conversation has its own pending buffer, timer and
-in-flight batch. Conversation type is part of the buffered session and receipt
-identity, so a same-named private chat and group cannot share model history
-just because their notification keys coincide. Physical chat selection still
+in-flight batch. Conversation type is part of the buffer and receipt identity.
+Batched turns keep the conversation's existing Hermes session (derived from the
+Android notification key, as for non-batched turns), so instructions given
+before enabling participation stay in the model's history. Physical chat selection still
 uses the existing title-based phone workflow and its ambiguity checks; this
 session isolation does not introduce a new WeChat recipient ID API. While one
 batch runs, subsequent notifications enter the next batch. The running batch's
@@ -148,13 +172,21 @@ welcome. This works only insofar as WeChat emits notifications accordingly:
   participation. Use a higher-priority explicit policy rule for a hard exclusion.
 - Being unmuted does not guarantee notification delivery, particularly when the
   relevant chat is open. Missing notifications are not recovered by this feature.
-- Only authenticated helper events explicitly classified `group` or `private`,
-  with a usable conversation title and that mode enabled, enter its buffer.
-  Unknown and summary notifications do not. With either participation mode enabled the legacy `wechat_assume_unmentioned_private`
-  heuristic is disabled; unknown non-@ notifications are no longer assumed DMs.
-  Explicitly classified DMs use the shared private buffer when opted in;
-  otherwise their existing immediate-dispatch behavior remains. Existing
-  explicit-mention policy paths remain available.
+- Only authenticated helper events classified `group` or `private`, with a
+  usable conversation title and that mode enabled, enter its buffer. Summary
+  notifications do not.
+
+### Group classification
+
+Some WeChat builds omit `android.isGroupConversation`, so the helper reports
+every message as `unknown` and no group batch ever forms. List unmuted groups
+in `group_participation.titles`: notifications with a matching conversation
+title are classified as groups. The legacy `wechat_assume_unmentioned_private`
+heuristic (unmentioned unknown notifications are DMs) stays active unless group
+participation is enabled **without** titles, where it would misfile unmuted
+group chatter as DMs. Keep every unlisted group muted when relying on it. A
+private contact whose display name equals a listed title is treated as that
+group; ordinary group turns can still only reply to that title.
 
 No shared memory settings are changed. If different chats must not see the
 owner's global `MEMORY.md`/`USER.md`, configure a fixed phone-task profile with

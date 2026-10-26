@@ -27,3 +27,14 @@ than allowing the report destination to collapse phone conversation identity.
 The phone event host is the only implementation surface. No helper APK, shared
 phone control APIs, Hermes core or live user configuration is changed. Existing
 manual controls and explicit global pause behavior remain available.
+
+## Approved private-conversation extension
+
+Private conversations share the notification scheduler, per-conversation pending
+and running batches, redaction, policy revalidation, destination guards and
+receipts. Enable private_participation independently; defaults are a 0.75-second
+quiet window, 3-second maximum wait and no group evaluation cooldown. Every
+explicitly classified private message has high invitation strength, while the
+same agent turn can choose NO_REPLY for natural conversation endings. Unknown
+notifications are not inferred to be private when either mode is enabled.
+Conversation type namespaces buffered session keys and delivery identities.

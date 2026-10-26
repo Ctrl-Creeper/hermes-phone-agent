@@ -192,8 +192,8 @@ The host OCR fallback currently requires macOS with `swiftc`; `setup.sh`
 builds and installs it automatically. Other platforms continue using Android's
 accessibility hierarchy and screenshots.
 
-Experimental [notification-only group participation](GROUP_PARTICIPATION.md)
-buffers received WeChat group notifications per conversation, then lets one
+Experimental [notification-only WeChat participation](CONVERSATION_PARTICIPATION.md)
+buffers received WeChat private and group notifications per conversation, then lets one
 agent turn choose silence or a natural reply. Buffering uses neither the phone
 nor a model. It is opt-in, preserves running tasks, and relies on WeChat's
 notification behavior for muted groups; it cannot read the mute switch or

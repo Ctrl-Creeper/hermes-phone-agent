@@ -13,14 +13,16 @@ individually so each retains its own authenticated policy and event identity.
 This integration uses Hermes' `_session_tasks` map; verify it after upgrading
 Hermes with the offline smoke check below.
 
-## Optional group notification batching
+## Optional conversation notification batching
 
-[Group participation](GROUP_PARTICIPATION.md) adds an opt-in admission layer
-before gateway dispatch. Authorized group notifications are buffered without
-phone/model work. Per-group timers and in-flight batches are independent;
+[Group participation](CONVERSATION_PARTICIPATION.md) adds an opt-in admission layer
+before gateway dispatch. Authorized private/group notifications are buffered without
+phone/model work. Per-conversation timers and in-flight batches are independent;
 started turns are never cancelled because another message arrives. A batch
-chooses `NO_REPLY` or writes its reply in the same agent call. Destination-bound
-hooks restrict group turns to supported composite phone actions, and attempted
+chooses `NO_REPLY` or writes its reply in the same agent call. Private messages
+use a shorter merge window and no group cooldown, with high invitation strength
+and optional silence at a natural conversation ending. Destination-bound
+hooks restrict buffered turns to supported composite phone actions, and attempted
 sends update participation statistics. Shared Telegram-topic routing is rejected
 for this mode to prevent conversation-history merging.
 

@@ -1,6 +1,6 @@
-# Experimental notification-only WeChat group participation
+# Experimental notification-only WeChat conversation participation
 
-This Hermes-only feature buffers authorized group notifications without
+This Hermes-only feature buffers authorized private and group notifications without
 operating the phone or calling a model. A normal agent turn evaluates a batch
 and either returns `NO_REPLY` or composes and sends a response. There is no
 separate classifier and no cancellation/regeneration when new messages arrive.
@@ -25,7 +25,17 @@ platforms:
         max_wait_seconds: 8
         min_interval_seconds: 30
         max_messages: 64
+      private_participation:
+        enabled: true
+        quiet_seconds: 0.75
+        max_wait_seconds: 3
+        min_interval_seconds: 0
 ```
+
+The two modes can be enabled independently; both default to disabled. Private
+messages use the same scheduler, isolation and destination guards with their
+own timing profile. They do not require `mention_names` or @. Their default
+invitation level is high, but conversational closing messages can choose silence.
 
 Use a Telegram destination without `telegram_thread_id`. Shared topics and
 `group_sessions_per_user: false` are rejected because the current Hermes source
@@ -54,6 +64,21 @@ Retain specific ignore/report rules with higher priority for any conversations
 or notification categories you do not want treated as an automatic inbox.
 Global restrictions, app action restrictions and authentication still apply.
 An ignore/report decision never becomes auto merely because batching is enabled.
+For private participation, also retain or add an explicit private-message auto
+rule. It is independent of the group rule above:
+
+```yaml
+  - match:
+      package: "com.tencent.mm"
+      event: notification
+      conversation_type: private
+    behavior: auto
+    instruction_source: true
+    allowed_actions: [wechat_reply, wechat_collect_context]
+    notes: "Handle requests naturally in this private conversation."
+    priority: 29
+```
+
 Restart the gateway after changing `config.yaml`; phone policy rules retain their
 existing hot-reload behavior. Buffered tasks are rechecked against the original
 authenticated payload before dispatch; only sanitized, truncated deltas reach
@@ -65,29 +90,43 @@ the model. This PR does not change your running installation.
   bypass the ordinary evaluation interval and wait at most 250 ms to combine
   consecutive notifications. Other @names do not trigger that fast path. The
   model can interpret implicit invitations from the batch and its own history.
+  All explicitly classified private messages have high invitation strength;
+  they still wait for the private quiet/max-wait window rather than taking
+  the group's 250 ms mention fast path.
 - **Discussion pace:** ordinary batches wait for `quiet_seconds` of silence,
   bounded by `max_wait_seconds`. Observed notification counts and the last
   arrival gap accompany the batch. These are notification statistics, not a
-  complete message/speaker census.
+  complete message/speaker census. Private messages use a 0.75-second quiet
+  window and 3-second maximum wait by default, combining split messages.
 - **Saturation:** ordinary evaluations are spaced by `min_interval_seconds`
   after the previous turn finishes, including turns that chose silence. Recent
-  reply-turn counts also accompany the batch. Attempted but unconfirmed sends
+  reply-turn counts also accompany the batch. Private conversations default to
+  a zero minimum interval, so a new turn can proceed immediately after its
+  short merge window instead of waiting through a group cooldown. Attempted but
+  unconfirmed sends
   consume a reply turn; suppressed duplicate sends do not.
 - **Value:** the same agent call that would compose a response decides whether
   there is anything useful or socially appropriate to add. Ordinary participation
   may only reply to its bound destination; it cannot open the phone or search
-  just to decide whether to speak. Explicitly invited turns may collect that
-  chat's context and perform web research under the existing task policy.
+  just to decide whether to speak. Explicitly invited group turns and private
+  turns may collect their own chat's context and perform web research under
+  the existing task policy. Private turns normally respond but may return
+  `NO_REPLY` for thanks, a closing acknowledgement or an already resolved exchange.
 
-Each group has its own pending buffer, timer and in-flight batch. While one
+Each private or group conversation has its own pending buffer, timer and
+in-flight batch. Conversation type is part of the buffered session and receipt
+identity, so a same-named private chat and group cannot share model history
+just because their notification keys coincide. Physical chat selection still
+uses the existing title-based phone workflow and its ambiguity checks; this
+session isolation does not introduce a new WeChat recipient ID API. While one
 batch runs, subsequent notifications enter the next batch. The running batch's
-observations and target stay fixed. An idle group never causes periodic model
-calls. Notifications do not consume the shared per-second event quota; package
-allowlisting still applies. Per-group replay deduplication uses notification
+observations and target stay fixed. An idle conversation never causes periodic model calls. Notifications do not consume the shared per-second event quota; package
+allowlisting still applies. Per-conversation replay deduplication uses notification
 identity, post time and content, retaining identical later single-line messages
 as distinct observations. Overlapping multiline notification updates contribute
 only new lines. A genuinely repeated multiline message can be indistinguishable
-from a cumulative update and may be suppressed by that overlap heuristic. Buffers retain at most `max_messages` notification fragments, favoring
+from a cumulative update and may be suppressed by that overlap heuristic.
+Buffers retain at most `max_messages` notification fragments, favoring
 invitations over older ordinary chatter, and disclose omitted fragment counts
 to the model. If all fragments are invitations, the oldest fragment is omitted.
 
@@ -109,12 +148,13 @@ welcome. This works only insofar as WeChat emits notifications accordingly:
   participation. Use a higher-priority explicit policy rule for a hard exclusion.
 - Being unmuted does not guarantee notification delivery, particularly when the
   relevant chat is open. Missing notifications are not recovered by this feature.
-- Only authenticated helper events explicitly classified `group`, with a usable
-  conversation title, enter the buffer. Unknown and summary notifications do not.
-  With participation enabled the legacy `wechat_assume_unmentioned_private`
+- Only authenticated helper events explicitly classified `group` or `private`,
+  with a usable conversation title and that mode enabled, enter its buffer.
+  Unknown and summary notifications do not. With either participation mode enabled the legacy `wechat_assume_unmentioned_private`
   heuristic is disabled; unknown non-@ notifications are no longer assumed DMs.
-  Explicitly classified DMs and existing explicit-mention policy paths retain
-  their behavior.
+  Explicitly classified DMs use the shared private buffer when opted in;
+  otherwise their existing immediate-dispatch behavior remains. Existing
+  explicit-mention policy paths remain available.
 
 No shared memory settings are changed. If different chats must not see the
 owner's global `MEMORY.md`/`USER.md`, configure a fixed phone-task profile with
@@ -131,12 +171,12 @@ notifications after restart.
 
 ```sh
 PYTHONPATH=. python3 -m pytest -q tests
-PYTHONPATH="$PWD:/path/to/hermes-agent" /path/to/hermes-agent/venv/bin/python scripts/check_group_participation.py
+PYTHONPATH="$PWD:/path/to/hermes-agent" /path/to/hermes-agent/venv/bin/python scripts/check_conversation_participation.py
 PYTHONPATH="$PWD:/path/to/hermes-agent" /path/to/hermes-agent/venv/bin/python scripts/check_gateway_lifecycle.py
 ```
 
 The integration checks use real Hermes background task/session machinery, a
 temporary Hermes home, in-memory transport and a noop phone. They contact no
-model, Telegram or Android device. Live validation should separately check
-muted @mentions, unmuted bursts, foreground delivery, notification replacement,
-private-message classification and exact destination matching.
+model, Telegram or Android device. Live validation should separately check muted @mentions, unmuted bursts,
+private bursts and conversation endings, foreground delivery, notification
+replacement, private-message classification and exact destination matching.

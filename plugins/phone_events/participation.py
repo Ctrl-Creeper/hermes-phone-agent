@@ -1,4 +1,4 @@
-"""Host-only notification batching and turn scope for WeChat group participation.
+"""Host-only notification batching and turn scope for WeChat conversations.
 
 All scheduler methods run on the gateway loop. Receiving a notification never
 reads the phone or calls a model. Started batches run to completion.
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ParticipationSettings:
     enabled: bool = False
+    conversation_type: str = 'group'
     mention_names: tuple[str, ...] = ()
     quiet_seconds: float = 2.0
     max_wait_seconds: float = 8.0
@@ -33,50 +34,57 @@ class ParticipationSettings:
     max_messages: int = 64
 
     @classmethod
-    def from_config(cls, raw: Any) -> ParticipationSettings:
+    def from_config(cls, raw: Any, *, conversation_type: str = 'group') -> ParticipationSettings:
+        if conversation_type not in {'group', 'private'}:
+            raise ValueError('participation conversation_type must be group or private')
+        defaults = (cls(conversation_type='private', quiet_seconds=.75,
+                        max_wait_seconds=3, min_interval_seconds=0)
+                    if conversation_type == 'private' else cls())
+        label = f'{conversation_type}_participation'
         if raw is None:
-            return cls()
+            return defaults
         if not isinstance(raw, dict):
-            raise ValueError('group_participation must be a mapping')
+            raise ValueError(f'{label} must be a mapping')
         if raw.get('enabled', False) is not True:
-            return cls()
+            return defaults
         names = raw.get('mention_names', [])
-        if (not isinstance(names, list) or not names
+        if (not isinstance(names, list) or (conversation_type == 'group' and not names)
                 or any(not isinstance(n, str) or not n.strip().lstrip('@') for n in names)):
-            raise ValueError('group_participation.mention_names must name your WeChat account')
+            raise ValueError(f'{label}.mention_names must name your WeChat account')
         values = {}
         for key in ('quiet_seconds', 'max_wait_seconds', 'min_interval_seconds'):
-            value = raw.get(key, getattr(cls(), key))
+            value = raw.get(key, getattr(defaults, key))
             if isinstance(value, bool):
-                raise ValueError(f'group_participation.{key} must be a finite number')
+                raise ValueError(f'{label}.{key} must be a finite number')
             try:
                 value = float(value)
             except (ValueError, TypeError):
-                raise ValueError(f'group_participation.{key} must be a finite number') from None
+                raise ValueError(f'{label}.{key} must be a finite number') from None
             if not math.isfinite(value) or value < 0 or (key != 'min_interval_seconds' and value == 0):
-                raise ValueError(f'group_participation.{key} must be positive (interval may be zero)')
+                raise ValueError(f'{label}.{key} must be positive (interval may be zero)')
             values[key] = value
-        count = raw.get('max_messages', cls().max_messages)
+        count = raw.get('max_messages', defaults.max_messages)
         if type(count) is not int or not 1 <= count <= 256:
-            raise ValueError('group_participation.max_messages must be between 1 and 256')
+            raise ValueError(f'{label}.max_messages must be between 1 and 256')
         if values['max_wait_seconds'] < values['quiet_seconds']:
-            raise ValueError('group_participation.max_wait_seconds must be at least quiet_seconds')
-        return cls(enabled=True, mention_names=tuple(n.strip().lstrip('@') for n in names),
+            raise ValueError(f'{label}.max_wait_seconds must be at least quiet_seconds')
+        return cls(enabled=True, conversation_type=conversation_type, mention_names=tuple(n.strip().lstrip('@') for n in names),
                    max_messages=count, **values)
 
     def is_invited(self, text: str) -> bool:
-        return any(re.search(r'@' + re.escape(name) + r'(?![\w])', text, re.IGNORECASE)
+        return self.conversation_type == 'private' or any(re.search(r'@' + re.escape(name) + r'(?![\w])', text, re.IGNORECASE)
                    for name in self.mention_names)
 
 
 @dataclass
-class GroupBatch:
+class ConversationBatch:
     lane: str
     events: tuple[PhoneEvent, ...]
     decisions: tuple[Any, ...]
     invited: bool
     metrics: dict[str, Any]
     replied: bool = False
+    conversation_type: str = 'group'
     # Kept only for host policy revalidation, never formatted into model input.
     policy_inputs: tuple[dict[str, str], ...] = field(default=(), repr=False)
 
@@ -109,9 +117,9 @@ class _Lane:
     running: asyncio.Task | None = None
 
 
-class GroupParticipation:
+class ConversationParticipation:
     def __init__(self, settings: ParticipationSettings,
-                 dispatch: Callable[[GroupBatch], Awaitable[None]], *, redact_otp: bool = True) -> None:
+                 dispatch: Callable[[ConversationBatch], Awaitable[None]], *, redact_otp: bool = True) -> None:
         self._redact_otp = redact_otp
         self.settings = settings
         self._dispatch = dispatch
@@ -131,7 +139,7 @@ class GroupParticipation:
                 idle = next((k for k, s in self._lanes.items()
                              if not s.pending and s.running is None), None)
                 if idle is None:
-                    logger.warning('Group participation capacity reached; observation not admitted')
+                    logger.warning('Conversation participation capacity reached; observation not admitted')
                     return False
                 self._lanes.pop(idle)
             state = self._lanes[lane] = _Lane(title=title)
@@ -140,7 +148,7 @@ class GroupParticipation:
             return False
         policy_input = dict(policy_input) if policy_input is not None else {
             'package': event.package, 'event_type': event.event_type,
-            'title': event.title, 'body': event.body, 'conversation_type': 'group',
+            'title': event.title, 'body': event.body, 'conversation_type': self.settings.conversation_type,
         }
         identity = hashlib.sha256(json.dumps([
             event.meta.get('notification_key'), event.timestamp,
@@ -189,7 +197,7 @@ class GroupParticipation:
             return
         loop = asyncio.get_running_loop()
         invited = any(observation.invited for observation in state.pending)
-        if invited:
+        if invited and self.settings.conversation_type == 'group':
             due = min(state.first_at + .25, state.last_at + self.settings.quiet_seconds)
         else:
             due = max(min(state.first_at + self.settings.max_wait_seconds,
@@ -207,8 +215,8 @@ class GroupParticipation:
             while times and times[0] < now - 300:
                 times.popleft()
         pending, state.pending = state.pending, []
-        batch = GroupBatch(
-            lane=lane, events=tuple(o.event for o in pending),
+        batch = ConversationBatch(
+            lane=lane, conversation_type=self.settings.conversation_type, events=tuple(o.event for o in pending),
             decisions=tuple(o.decision for o in pending),
             invited=any(o.invited for o in pending),
             policy_inputs=tuple(o.policy_input for o in pending),
@@ -223,12 +231,12 @@ class GroupParticipation:
         state.omitted = 0
         state.running = asyncio.create_task(self._run(lane, state, batch))
 
-    async def _run(self, lane: str, state: _Lane, batch: GroupBatch) -> None:
+    async def _run(self, lane: str, state: _Lane, batch: ConversationBatch) -> None:
         try:
             await self._dispatch(batch)
         except Exception:
             # A failed batch must not strand another group or cause a retry loop.
-            logger.exception('Group participation batch failed')
+            logger.exception('Conversation participation batch failed')
         finally:
             now = asyncio.get_running_loop().time()
             state.last_completed = now
@@ -247,20 +255,20 @@ class GroupParticipation:
             state.pending.clear()
 
 
-_group_turn: ContextVar[GroupBatch | None] = ContextVar('phone_group_turn', default=None)
+_conversation_turn: ContextVar[ConversationBatch | None] = ContextVar('phone_conversation_turn', default=None)
 
 
 @contextmanager
-def bind_group_turn(batch: GroupBatch | None):
-    token = _group_turn.set(batch)
+def bind_conversation_turn(batch: ConversationBatch | None):
+    token = _conversation_turn.set(batch)
     try:
         yield
     finally:
-        _group_turn.reset(token)
+        _conversation_turn.reset(token)
 
 
-def guard_group_tool(tool_name: str, args: dict | None = None, **kwargs):
-    batch = _group_turn.get()
+def guard_conversation_tool(tool_name: str, args: dict | None = None, **kwargs):
+    batch = _conversation_turn.get()
     if batch is None:
         return None
     args = args if isinstance(args, dict) else {}
@@ -274,14 +282,14 @@ def guard_group_tool(tool_name: str, args: dict | None = None, **kwargs):
         if allowed and isinstance(target, str) and target.strip() == batch.destination:
             return None
     return {'action': 'block', 'message': (
-        'This group turn may reply only to its bound conversation. '
-        'Only explicitly invited turns may read that conversation or research; '
+        'This turn may reply only to its bound conversation. '
+        'Only private or explicitly invited group turns may read that conversation or research; '
         'ordinary participation must use the observed notification context or remain silent.'
     )}
 
 
-def record_group_reply(tool_name: str, args: dict | None = None, result: Any = None, **kwargs):
-    batch = _group_turn.get()
+def record_conversation_reply(tool_name: str, args: dict | None = None, result: Any = None, **kwargs):
+    batch = _conversation_turn.get()
     if batch is None or tool_name != 'phone_use' or not isinstance(args, dict):
         return
     target = args.get('chat')

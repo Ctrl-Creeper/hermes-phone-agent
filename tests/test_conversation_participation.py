@@ -791,3 +791,21 @@ def test_reply_clears_the_carry(monkeypatch):
 def test_long_silence_drops_the_carry(monkeypatch):
     second = _carry_scenario(monkeypatch, reply_first=False, gap=.15, window=.1)
     assert [e.body for e in second.events] == ['more'] and second.carried == 0
+
+
+def test_carry_never_pushes_a_batch_past_max_messages(monkeypatch):
+    async def scenario():
+        batches, done = [], [asyncio.Event(), asyncio.Event()]
+        async def dispatch(batch):
+            batches.append(batch)
+            batch.evaluated = True
+            done[len(batches) - 1].set()
+        scheduler = ConversationParticipation(settings(max_messages=2), dispatch)
+        scheduler.observe('A', event('old'), SimpleNamespace())
+        await asyncio.wait_for(done[0].wait(), 1)
+        scheduler.observe('A', event('n1', timestamp=2), SimpleNamespace())
+        scheduler.observe('A', event('n2', timestamp=3), SimpleNamespace())
+        await asyncio.wait_for(done[1].wait(), 1)
+        scheduler.close()
+        assert [e.body for e in batches[1].events] == ['n1', 'n2']
+    asyncio.run(scenario())

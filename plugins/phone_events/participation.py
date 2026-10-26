@@ -314,7 +314,8 @@ class ConversationParticipation:
         fresh, state.pending = state.pending, []
         if state.carried and state.first_at - state.carried_last_at > CARRY_SILENCE_SECONDS:
             state.carried = []
-        carried = state.carried[-max(0, self.settings.max_messages - len(fresh)):] if state.carried else []
+        budget = max(0, self.settings.max_messages - len(fresh))
+        carried = state.carried[-budget:] if budget else []  # [-0:] would keep everything
         state.carried = []
         pending = carried + fresh
         batch = ConversationBatch(
@@ -349,7 +350,7 @@ class ConversationParticipation:
                 state.replies.append(now)
             elif batch.evaluated and not self._closed:
                 # Silence keeps the discussion open: re-offer it with what comes next.
-                state.carried = list(observations)
+                state.carried = list(observations)[-self.settings.max_messages:]
                 state.carried_last_at = observations[-1].at if observations else now
             state.running = None
             self._schedule(lane, state)

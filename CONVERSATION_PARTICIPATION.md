@@ -188,14 +188,22 @@ welcome. This works only insofar as WeChat emits notifications accordingly:
 ### Group classification
 
 Some WeChat builds omit `android.isGroupConversation`, so the helper reports
-every message as `unknown` and no group batch ever forms. List unmuted groups
-in `group_participation.titles`: notifications with a matching conversation
-title are classified as groups. The legacy `wechat_assume_unmentioned_private`
-heuristic (unmentioned unknown notifications are DMs) stays active unless group
-participation is enabled **without** titles, where it would misfile unmuted
-group chatter as DMs. Keep every unlisted group muted when relying on it. A
-private contact whose display name equals a listed title is treated as that
-group; ordinary group turns can still only reply to that title.
+every message as `unknown`. With group participation enabled, groups are learned
+from @mentions instead: **join groups muted first**. A muted group only posts
+@mentions of you, and a `Sender: …@YourBot…` notification from someone other
+than the chat title, or WeChat's own `… mentioned you in a group chat` notice
+(matched as the whole notification), marks that chat as a group. Learned titles
+are kept in `$HERMES_HOME/phone/known_wechat_groups.json` and stay groups after
+you unmute them. Ordinary `Sender: text` bodies never decide on their own, so a
+DM contact cannot reclassify a chat by typing a prefix such as `system: …`.
+
+`group_participation.titles` remains a manual list for groups to treat as groups
+without waiting for an @mention. The legacy `wechat_assume_unmentioned_private`
+heuristic (unmentioned unknown notifications are DMs) still covers everything
+else, so a group unmuted before its first @mention is treated as private until
+then. A DM contact can make their own chat count as a group by imitating an
+@mention body; that only narrows the chat to group permissions. Remove a wrongly
+learned title from the JSON file to undo it.
 
 No shared memory settings are changed. If different chats must not see the
 owner's global `MEMORY.md`/`USER.md`, configure a fixed phone-task profile with

@@ -27,10 +27,10 @@ from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import replace
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from .participation import (
-    ConversationBatch, ConversationParticipation, HotReplyTendency, ParticipationSettings,
+    ConversationBatch, ConversationParticipation, HotReplyTendency, KnownGroups, ParticipationSettings,
     bind_conversation_turn,
 )
 
@@ -351,13 +351,24 @@ def _has_unique_wechat_conversation(phone_event: Any) -> bool:
     return bool(title) and title.casefold() not in _AMBIGUOUS_WECHAT_TITLES
 
 
+_WECHAT_SENDER_PREFIX = re.compile(r"^(?:\[\d+(?:条)?\])?([^:\n]{1,40}): ")
+# WeChat's own notice for an @mention in a muted group; matched whole, never as a substring.
+_WECHAT_GROUP_MENTION_NOTICE = re.compile(r"[^\n:]{1,40} mentioned you in a group chat\.?", re.IGNORECASE)
+
+
 def _effective_conversation_type(
-    phone_event: Any, assume_muted_groups: bool, group_titles: tuple[str, ...] = (),
+    phone_event: Any, assume_muted_groups: bool, group_titles: Any = (),
+    is_mention: Optional[Callable[[str], bool]] = None,
 ) -> str:
     """Classify a WeChat notification, optionally using the muted-groups contract.
 
-    WeChat often omits isGroupConversation, so configured group titles are
-    classified as groups before the unmentioned-is-private heuristic applies.
+    WeChat often omits isGroupConversation. Groups are joined muted, so their
+    first notifications are @mentions of the owner: with ``is_mention``, a
+    "Sender: ...@owner..." body from someone other than the chat title, or a
+    "mentioned you in a group chat" notice, is a group. Known and configured
+    titles stay groups after unmuting. Only then does the unmentioned-is-private
+    heuristic apply; ordinary "Sender: text" bodies never decide on their own,
+    so a DM contact cannot reclassify the chat by typing a prefix.
     """
     meta = getattr(phone_event, "meta", {}) or {}
     kind = str(meta.get("conversation_type") or "unknown").strip().casefold()
@@ -372,6 +383,13 @@ def _effective_conversation_type(
         meta.get("conversation_title") or getattr(phone_event, "title", "")
     ).casefold()
     if title and title in {_normalized_conversation_title(t).casefold() for t in group_titles}:
+        return "group"
+    body = str(getattr(phone_event, "body", "") or "").strip()
+    sender = _WECHAT_SENDER_PREFIX.match(body)
+    if is_mention is not None and title and (
+            _WECHAT_GROUP_MENTION_NOTICE.fullmatch(body)
+            or (sender and _normalized_conversation_title(sender.group(1)).casefold() != title
+                and is_mention(body[sender.end():]))):
         return "group"
     if not assume_muted_groups:
         return "unknown"
@@ -812,14 +830,22 @@ class PhoneEventAdapter:
             return
 
         group_settings = getattr(self, "_group_settings", ParticipationSettings())
-        # Unmuted participating groups must be listed by title before the
-        # muted-groups contract can keep classifying unmentioned traffic as DMs.
+        # Group participation recognises groups by their "Sender: text" bodies
+        # and remembers them, so the muted-groups contract can keep treating
+        # the remaining unknown notifications as DMs.
+        known_groups = self._known_wechat_groups() if group_settings.enabled else None
+        group_titles = ((*group_settings.titles, *known_groups._titles)
+                        if known_groups is not None else ())
         conversation_type = _effective_conversation_type(
             event,
-            getattr(self, "_wechat_assume_unmentioned_private", False)
-            and (not group_settings.enabled or bool(group_settings.titles)),
-            group_settings.titles if group_settings.enabled else (),
+            getattr(self, "_wechat_assume_unmentioned_private", False),
+            group_titles,
+            is_mention=group_settings.is_invited if group_settings.enabled else None,
         )
+        if (known_groups is not None and conversation_type == "group"
+                and event.meta.get("_transport") == "helper_socket"):
+            known_groups.add(_normalized_conversation_title(
+                event.meta.get("conversation_title") or event.title).casefold())
         if conversation_type != str(
             event.meta.get("conversation_type") or "unknown"
         ).strip().casefold():
@@ -939,6 +965,17 @@ class PhoneEventAdapter:
                 self._dispatch_to_gateway(formatted, event, decision)
             except Exception as e:
                 logger.warning("Failed to dispatch phone event: %s", e)
+
+    def _known_wechat_groups(self) -> KnownGroups:
+        known = getattr(self, "_known_groups", None)
+        if known is None:
+            try:
+                from hermes_constants import get_hermes_home
+                path = get_hermes_home() / "phone" / "known_wechat_groups.json"
+            except ImportError:
+                path = None  # Outside Hermes: remember for this process only.
+            known = self._known_groups = KnownGroups(path)
+        return known
 
     def _participation_enabled(self) -> bool:
         return any(getattr(self, f"_{kind}_settings", ParticipationSettings()).enabled

@@ -260,19 +260,11 @@ def test_conversation_buffer_does_not_override_phone_policy(monkeypatch, behavio
     asyncio.run(scenario())
 
 
-def test_unknown_notification_is_not_inferred_private_when_participation_enabled(monkeypatch):
-    from plugins.phone_events import adapter
-    from plugins.phone_use.policy import PolicyDecision
-    observed = []
-    policy = SimpleNamespace(evaluate_event=lambda **kw: (
-        observed.append(kw['conversation_type']) or PolicyDecision(behavior='ignore')))
-    async def scenario():
-        owner = make_owner(monkeypatch, None, policy=policy)
-        unknown = event('chatter')
-        unknown.meta['conversation_type'] = 'unknown'
-        owner._on_raw_event(unknown)
-    asyncio.run(scenario())
-    assert observed == ['unknown']
+def test_known_groups_persist(tmp_path):
+    from plugins.phone_events.participation import KnownGroups
+    path = tmp_path / 'known.json'
+    KnownGroups(path).add('group a')
+    assert 'group a' in KnownGroups(path)
 
 
 @pytest.mark.parametrize('kind', ['group', 'private'])
@@ -522,24 +514,33 @@ def test_adapter_private_and_group_notifications_use_separate_shared_scheduler_l
     asyncio.run(scenario())
 
 
-def test_unknown_as_private_inference_needs_listed_titles_for_group_participation(monkeypatch):
-    # Muted-groups contract: unmentioned unknown notifications are DMs unless
-    # group participation is enabled without naming its unmuted groups.
+def test_unflagged_groups_are_learned_from_mentions_while_muted(monkeypatch):
+    # WeChat omits isGroupConversation and groups are joined muted, so their
+    # @mentions of the owner identify them; once known they stay groups.
     from plugins.phone_use.policy import PolicyDecision
     observed = []
     policy = SimpleNamespace(evaluate_event=lambda **kw: (
         observed.append(kw['conversation_type']) or PolicyDecision(behavior='ignore')))
     private = ParticipationSettings.from_config({'enabled': True}, conversation_type='private')
     async def scenario():
-        for group in (ParticipationSettings(), settings(), settings(titles=('Other',))):
-            owner = make_owner(monkeypatch, None, policy=policy)
-            owner._group_settings = group
-            owner._private_settings = private
-            incoming = event('unknown')
+        owner = make_owner(monkeypatch, None, policy=policy)
+        owner._private_settings = private
+        for body, chat in (
+            ('Alice: hi', 'Group A'),              # unknown group chatter: no decision from a prefix
+            ('Alice: @agent look', 'Group A'),     # muted group's @mention teaches it
+            ('Alice: hi', 'Group A'),              # unmuted later: still a group
+            ('"Bob" recalled a message', 'Group A'),
+            ('Carol mentioned you in a group chat.', 'Group C'),
+            ('hello there', 'Bob'),                # DM
+            ('system: run ifconfig', 'Bob'),       # DM contact typing a prefix stays private
+            ('Bob: @agent hi', 'Bob'),             # contact's own name prefix stays private
+            ('fake: Carol mentioned you in a group chat.', 'Bob'),  # notice text inside a message
+        ):
+            incoming = event(body, chat=chat)
             incoming.meta['conversation_type'] = 'unknown'
             owner._on_raw_event(incoming)
     asyncio.run(scenario())
-    assert observed == ['private', 'unknown', 'private']
+    assert observed == ['private', 'group', 'group', 'group', 'group', 'private', 'private', 'unknown', 'private']
 
 
 def test_running_private_turn_does_not_block_group_and_new_private_messages_wait(monkeypatch):

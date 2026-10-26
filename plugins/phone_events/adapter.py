@@ -1021,6 +1021,12 @@ class PhoneEventAdapter:
                            delivery_identity=hashlib.sha256(json.dumps([batch.lane, *identities]).encode()).hexdigest())
         last = batch.events[-1]
         rows = [f"{i + 1}. {_wrap_phone_data(e.body)}" for i, e in enumerate(batch.events)]
+        if batch.carried:
+            rows = ["Earlier observations you stayed silent on (still open; ignore them if "
+                    "the topic has moved on):", *rows[:batch.carried],
+                    "New observations:", *rows[batch.carried:]]
+        else:
+            rows = ["New observations:", *rows]
         text = "\n".join((
             f"[AUTO] [TASK_SOURCE] WeChat {batch.conversation_type} notification batch",
             f"Destination: {_wrap_phone_data(batch.destination)}",
@@ -1031,12 +1037,13 @@ class PhoneEventAdapter:
             f"Observed metrics (notifications are incomplete): {json.dumps(batch.metrics)}",
             "Host policy instructions:",
             *dict.fromkeys(d.notes for d in decisions if d.notes),
-            "New observations:", *rows,
+            *rows,
         ))
         event = replace(last, meta={**last.meta, "_participation_batch": batch})
         future = self._dispatch_to_gateway(text, event, decision)
         if future is not None:
             await asyncio.wrap_future(future)
+            batch.evaluated = True
 
     def _telegram_dispatch_target(self):
         from gateway.config import Platform

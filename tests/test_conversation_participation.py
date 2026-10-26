@@ -754,3 +754,40 @@ def test_held_zero_tendency_lanes_do_not_block_new_invitations():
         assert scheduler.observe('new', event('@agent hi', chat='New'), SimpleNamespace())
         scheduler.close()
     asyncio.run(scenario())
+
+
+def _carry_scenario(monkeypatch, *, reply_first, gap, window=300.0):
+    from plugins.phone_events import participation
+    monkeypatch.setattr(participation, 'CARRY_SILENCE_SECONDS', window)
+    async def scenario():
+        batches, done = [], [asyncio.Event(), asyncio.Event()]
+        async def dispatch(batch):
+            batches.append(batch)
+            batch.evaluated = True
+            batch.replied = reply_first and len(batches) == 1
+            done[len(batches) - 1].set()
+        scheduler = ConversationParticipation(settings(), dispatch)
+        scheduler.observe('A', event('topic?'), SimpleNamespace())
+        await asyncio.wait_for(done[0].wait(), 1)
+        await asyncio.sleep(gap)
+        scheduler.observe('A', event('more', timestamp=2), SimpleNamespace())
+        await asyncio.wait_for(done[1].wait(), 1)
+        scheduler.close()
+        return batches[1]
+    return asyncio.run(scenario())
+
+
+def test_silent_batch_is_carried_into_the_next(monkeypatch):
+    second = _carry_scenario(monkeypatch, reply_first=False, gap=.01)
+    assert [e.body for e in second.events] == ['topic?', 'more'] and second.carried == 1
+    assert second.metrics['observed_notifications'] == 1
+
+
+def test_reply_clears_the_carry(monkeypatch):
+    second = _carry_scenario(monkeypatch, reply_first=True, gap=.01)
+    assert [e.body for e in second.events] == ['more'] and second.carried == 0
+
+
+def test_long_silence_drops_the_carry(monkeypatch):
+    second = _carry_scenario(monkeypatch, reply_first=False, gap=.15, window=.1)
+    assert [e.body for e in second.events] == ['more'] and second.carried == 0

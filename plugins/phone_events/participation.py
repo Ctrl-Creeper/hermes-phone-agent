@@ -22,6 +22,10 @@ from .redact import redact_sensitive, truncate_notification_body
 
 logger = logging.getLogger(__name__)
 
+# Observations the agent stayed silent on are re-offered with the next batch
+# unless the conversation went quiet for this long in between.
+CARRY_SILENCE_SECONDS = 300.0
+
 # A reply may be split into a few messages; more is a runaway turn.
 MAX_SENDS_PER_TURN = 3
 
@@ -161,6 +165,10 @@ class ConversationBatch:
     metrics: dict[str, Any]
     replied: bool = False
     sends: int = 0
+    # The model ran to completion (it replied or chose NO_REPLY).
+    evaluated: bool = False
+    # Leading events repeated from earlier batches the agent stayed silent on.
+    carried: int = 0
     conversation_type: str = 'group'
     reply_tendency: float = 0.5
     # Kept only for host policy revalidation, never formatted into model input.
@@ -177,6 +185,7 @@ class _Observation:
     decision: Any
     invited: bool
     policy_input: dict[str, str] = field(repr=False)
+    at: float = 0  # Loop time of arrival.
 
 
 @dataclass
@@ -191,6 +200,8 @@ class _Lane:
     last_at: float = 0
     last_completed: float = float('-inf')
     omitted: int = 0
+    carried: list[_Observation] = field(default_factory=list)
+    carried_last_at: float = 0
     timer: asyncio.TimerHandle | None = None
     running: asyncio.Task | None = None
 
@@ -264,7 +275,7 @@ class ConversationParticipation:
         if not state.pending:
             state.first_at = now
         state.last_at = now
-        state.pending.append(_Observation(observed, decision, invited, policy_input))
+        state.pending.append(_Observation(observed, decision, invited, policy_input, now))
         if len(state.pending) > self.settings.max_messages:
             index = next((i for i, observation in enumerate(state.pending) if not observation.invited), 0)
             state.pending.pop(index)
@@ -300,15 +311,21 @@ class ConversationParticipation:
         for times in (state.arrivals, state.replies):
             while times and times[0] < now - 300:
                 times.popleft()
-        pending, state.pending = state.pending, []
+        fresh, state.pending = state.pending, []
+        if state.carried and state.first_at - state.carried_last_at > CARRY_SILENCE_SECONDS:
+            state.carried = []
+        carried = state.carried[-max(0, self.settings.max_messages - len(fresh)):] if state.carried else []
+        state.carried = []
+        pending = carried + fresh
         batch = ConversationBatch(
+            carried=len(carried),
             lane=lane, conversation_type=self.settings.conversation_type, events=tuple(o.event for o in pending),
             reply_tendency=self._tendency(state.title),
             decisions=tuple(o.decision for o in pending),
-            invited=any(o.invited for o in pending),
+            invited=any(o.invited for o in fresh),
             policy_inputs=tuple(o.policy_input for o in pending),
             metrics={
-                'observed_notifications': len(pending),
+                'observed_notifications': len(fresh),
                 'notifications_last_minute': sum(t >= now - 60 for t in state.arrivals),
                 'seconds_since_last_notification': round(now - state.last_at, 2),
                 'replies_last_five_minutes': len(state.replies),
@@ -316,9 +333,10 @@ class ConversationParticipation:
             },
         )
         state.omitted = 0
-        state.running = asyncio.create_task(self._run(lane, state, batch))
+        state.running = asyncio.create_task(self._run(lane, state, batch, pending))
 
-    async def _run(self, lane: str, state: _Lane, batch: ConversationBatch) -> None:
+    async def _run(self, lane: str, state: _Lane, batch: ConversationBatch,
+                   observations: list[_Observation] = ()) -> None:
         try:
             await self._dispatch(batch)
         except Exception:
@@ -329,6 +347,10 @@ class ConversationParticipation:
             state.last_completed = now
             if batch.replied:
                 state.replies.append(now)
+            elif batch.evaluated and not self._closed:
+                # Silence keeps the discussion open: re-offer it with what comes next.
+                state.carried = list(observations)
+                state.carried_last_at = observations[-1].at if observations else now
             state.running = None
             self._schedule(lane, state)
 
@@ -340,6 +362,7 @@ class ConversationParticipation:
                 state.timer.cancel()
                 state.timer = None
             state.pending.clear()
+            state.carried.clear()
 
 
 _conversation_turn: ContextVar[ConversationBatch | None] = ContextVar('phone_conversation_turn', default=None)

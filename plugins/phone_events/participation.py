@@ -32,6 +32,8 @@ class ParticipationSettings:
     max_wait_seconds: float = 8.0
     min_interval_seconds: float = 30.0
     max_messages: int = 64
+    # Group titles to classify as groups when WeChat omits isGroupConversation.
+    titles: tuple[str, ...] = ()
 
     @classmethod
     def from_config(cls, raw: Any, *, conversation_type: str = 'group') -> ParticipationSettings:
@@ -68,8 +70,12 @@ class ParticipationSettings:
             raise ValueError(f'{label}.max_messages must be between 1 and 256')
         if values['max_wait_seconds'] < values['quiet_seconds']:
             raise ValueError(f'{label}.max_wait_seconds must be at least quiet_seconds')
+        titles = raw.get('titles', [])
+        if (not isinstance(titles, list) or (titles and conversation_type != 'group')
+                or any(not isinstance(t, str) or not t.strip() for t in titles)):
+            raise ValueError(f'{label}.titles must list group conversation titles')
         return cls(enabled=True, conversation_type=conversation_type, mention_names=tuple(n.strip().lstrip('@') for n in names),
-                   max_messages=count, **values)
+                   max_messages=count, titles=tuple(t.strip() for t in titles), **values)
 
     def is_invited(self, text: str) -> bool:
         return self.conversation_type == 'private' or any(re.search(r'@' + re.escape(name) + r'(?![\w])', text, re.IGNORECASE)

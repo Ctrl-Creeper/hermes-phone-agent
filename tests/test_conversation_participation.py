@@ -522,20 +522,24 @@ def test_adapter_private_and_group_notifications_use_separate_shared_scheduler_l
     asyncio.run(scenario())
 
 
-def test_private_participation_alone_disables_unknown_as_private_inference(monkeypatch):
+def test_unknown_as_private_inference_needs_listed_titles_for_group_participation(monkeypatch):
+    # Muted-groups contract: unmentioned unknown notifications are DMs unless
+    # group participation is enabled without naming its unmuted groups.
     from plugins.phone_use.policy import PolicyDecision
     observed = []
     policy = SimpleNamespace(evaluate_event=lambda **kw: (
         observed.append(kw['conversation_type']) or PolicyDecision(behavior='ignore')))
+    private = ParticipationSettings.from_config({'enabled': True}, conversation_type='private')
     async def scenario():
-        owner = make_owner(monkeypatch, None, policy=policy)
-        owner._group_settings = ParticipationSettings()
-        owner._private_settings = ParticipationSettings.from_config({'enabled': True}, conversation_type='private')
-        incoming = event('unknown')
-        incoming.meta['conversation_type'] = 'unknown'
-        owner._on_raw_event(incoming)
+        for group in (ParticipationSettings(), settings(), settings(titles=('Other',))):
+            owner = make_owner(monkeypatch, None, policy=policy)
+            owner._group_settings = group
+            owner._private_settings = private
+            incoming = event('unknown')
+            incoming.meta['conversation_type'] = 'unknown'
+            owner._on_raw_event(incoming)
     asyncio.run(scenario())
-    assert observed == ['unknown']
+    assert observed == ['private', 'unknown', 'private']
 
 
 def test_running_private_turn_does_not_block_group_and_new_private_messages_wait(monkeypatch):
@@ -599,3 +603,42 @@ def test_closing_admission_clears_both_modes_pending_buffers(monkeypatch):
         assert owner._group_participation is None
         assert batches == []
     asyncio.run(scenario())
+
+
+def test_listed_group_titles_classify_unflagged_wechat_notifications():
+    """WeChat often omits isGroupConversation; listed titles still batch as groups."""
+    from plugins.phone_events import adapter
+
+    def unflagged(body, chat):
+        e = event(body, chat=chat)
+        e.meta['conversation_type'] = 'unknown'
+        return e
+
+    titles = ('学习小组 Study',)
+    assert adapter._effective_conversation_type(unflagged('x: hi', '学习小组 Study (2条新消息)'), True, titles) == 'group'
+    assert adapter._effective_conversation_type(unflagged('hi', 'Friend'), True, titles) == 'private'
+    assert adapter._effective_conversation_type(unflagged('@a hi', 'Friend'), True, titles) == 'unknown'
+    assert adapter._effective_conversation_type(unflagged('hi', 'Friend'), False, titles) == 'unknown'
+
+    async def scenario():
+        batches, ready = [], asyncio.Event()
+        async def dispatch(batch):
+            batches.append(batch)
+            ready.set()
+        owner = make_owner(monkeypatch=pytest_monkeypatch, dispatch=dispatch)
+        owner._group_settings = settings(titles=titles)
+        owner._on_raw_event(unflagged('x: hi', '学习小组 Study'))
+        await asyncio.wait_for(ready.wait(), 1)
+        owner._group_participation.close()
+        assert [b.conversation_type for b in batches] == ['group']
+    import pytest
+    with pytest.MonkeyPatch.context() as pytest_monkeypatch:
+        asyncio.run(scenario())
+
+
+def test_titles_config_is_group_only():
+    import pytest
+    assert ParticipationSettings.from_config(
+        {'enabled': True, 'mention_names': ['me'], 'titles': ['G']}).titles == ('G',)
+    with pytest.raises(ValueError):
+        ParticipationSettings.from_config({'enabled': True, 'titles': ['G']}, conversation_type='private')

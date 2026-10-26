@@ -328,18 +328,29 @@ def _has_unique_wechat_conversation(phone_event: Any) -> bool:
     return bool(title) and title.casefold() not in _AMBIGUOUS_WECHAT_TITLES
 
 
-def _effective_conversation_type(phone_event: Any, assume_muted_groups: bool) -> str:
-    """Classify a WeChat notification, optionally using the muted-groups contract."""
+def _effective_conversation_type(
+    phone_event: Any, assume_muted_groups: bool, group_titles: tuple[str, ...] = (),
+) -> str:
+    """Classify a WeChat notification, optionally using the muted-groups contract.
+
+    WeChat often omits isGroupConversation, so configured group titles are
+    classified as groups before the unmentioned-is-private heuristic applies.
+    """
     meta = getattr(phone_event, "meta", {}) or {}
     kind = str(meta.get("conversation_type") or "unknown").strip().casefold()
     if kind in {"group", "private"}:
         return kind
-    if not assume_muted_groups:
-        return "unknown"
     if (
         getattr(phone_event, "event_type", "") != "notification"
         or getattr(phone_event, "package", "") != _WECHAT_PACKAGE
     ):
+        return "unknown"
+    title = _normalized_conversation_title(
+        meta.get("conversation_title") or getattr(phone_event, "title", "")
+    ).casefold()
+    if title and title in {_normalized_conversation_title(t).casefold() for t in group_titles}:
+        return "group"
+    if not assume_muted_groups:
         return "unknown"
     text = f"{getattr(phone_event, 'title', '')}\n{getattr(phone_event, 'body', '')}"
     return "unknown" if "@" in text else "private"
@@ -777,10 +788,14 @@ class PhoneEventAdapter:
                 self._dispatch_friend_request_approval(event, requester)
             return
 
+        group_settings = getattr(self, "_group_settings", ParticipationSettings())
+        # Unmuted participating groups must be listed by title before the
+        # muted-groups contract can keep classifying unmentioned traffic as DMs.
         conversation_type = _effective_conversation_type(
             event,
             getattr(self, "_wechat_assume_unmentioned_private", False)
-            and not self._participation_enabled(),
+            and (not group_settings.enabled or bool(group_settings.titles)),
+            group_settings.titles if group_settings.enabled else (),
         )
         if conversation_type != str(
             event.meta.get("conversation_type") or "unknown"

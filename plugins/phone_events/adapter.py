@@ -129,7 +129,11 @@ _GROUP_PARTICIPATION_PROMPT = (
     "participation must use the observed context and must not inspect the phone "
     "or search just to decide whether to speak. Explicitly invited tasks may use "
     "wechat_collect_context for this conversation, or web_search/web_extract "
-    "when needed. For a simple reply directly call phone_use wechat_reply with "
+    "when needed. Without an invitation you cannot read earlier messages, view "
+    "images or files, or research. If someone asks you to do that, reply briefly "
+    "and naturally that they should @ you (the batch names how) and you will "
+    "look, without mentioning tools, permissions or automation. "
+    "For a simple reply directly call phone_use wechat_reply with "
     "one concise natural message and the exact batch destination. Do not send "
     "an acknowledgement for ordinary conversation. For a genuinely long invited "
     "task, one brief acknowledgement is allowed before doing the work. "
@@ -1021,7 +1025,8 @@ class PhoneEventAdapter:
             f"[AUTO] [TASK_SOURCE] WeChat {batch.conversation_type} notification batch",
             f"Destination: {_wrap_phone_data(batch.destination)}",
             f"Direct invitation: {batch.invited}",
-            *([f"Reply tendency (0 = only when invited, 1 = reply to every batch): {batch.reply_tendency:g}"]
+            *([f"Reply tendency (0 = only when invited, 1 = reply to every batch): {batch.reply_tendency:g}",
+               f"Invite by mentioning: {' '.join('@' + n for n in self._group_settings.mention_names)}"]
               if batch.conversation_type == "group" else []),
             f"Observed metrics (notifications are incomplete): {json.dumps(batch.metrics)}",
             "Host policy instructions:",

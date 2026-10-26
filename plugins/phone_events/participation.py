@@ -373,8 +373,9 @@ def guard_conversation_tool(tool_name: str, args: dict | None = None, **kwargs):
             return None
     return {'action': 'block', 'message': (
         'This turn may reply only to its bound conversation. '
-        'Only private or explicitly invited group turns may read that conversation or research; '
-        'ordinary participation must use the observed notification context or remain silent.'
+        'Only private or explicitly invited group turns may read that conversation, view images or research; '
+        'ordinary participation must use the observed notification context. If someone asked you to look at '
+        'something, reply naturally that they should @ you first, or remain silent.'
     )}
 
 

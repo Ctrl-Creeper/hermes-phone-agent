@@ -14,7 +14,7 @@ from .adapter import (
     check_phone_events_requirements,
 )
 
-from .participation import guard_conversation_tool, record_conversation_reply
+from .participation import apply_conversation_cooldown, guard_conversation_tool, record_conversation_reply
 
 
 def _phone_events_is_connected(config) -> bool:
@@ -47,6 +47,8 @@ def _phone_events_env_config():
 
 
 def register(ctx) -> None:
+    # Before report formatting: first non-empty transform wins.
+    ctx.register_hook("transform_llm_output", apply_conversation_cooldown)
     ctx.register_hook("transform_llm_output", _prepend_phone_report_context)
     ctx.register_hook("pre_tool_call", guard_conversation_tool)
     ctx.register_hook("post_tool_call", record_conversation_reply)

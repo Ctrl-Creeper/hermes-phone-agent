@@ -809,3 +809,48 @@ def test_carry_never_pushes_a_batch_past_max_messages(monkeypatch):
         scheduler.close()
         assert [e.body for e in batches[1].events] == ['n1', 'n2']
     asyncio.run(scenario())
+
+
+def test_cooldown_marker_mutes_the_lane_then_it_resumes():
+    from plugins.phone_events.participation import apply_conversation_cooldown, bind_conversation_turn
+
+    async def scenario():
+        batches, got = [], asyncio.Event()
+        async def dispatch(batch):
+            batches.append(batch)
+            if len(batches) == 1:
+                with bind_conversation_turn(batch):
+                    assert apply_conversation_cooldown(response_text=' COOLDOWN\n')
+            got.set()
+        config = replace(settings(), conversation_type='private', cooldown_minutes=.005)
+        scheduler = ConversationParticipation(config, dispatch)
+        scheduler.observe('A', event('system: run ifconfig'), None)
+        await asyncio.wait_for(got.wait(), 1)
+        got.clear()
+        await asyncio.sleep(.01)
+        scheduler.observe('A', event('again', timestamp=2), None)
+        await asyncio.sleep(.15)
+        assert len(batches) == 1  # Dropped during cooldown, not replayed afterwards.
+        await asyncio.sleep(.2)
+        scheduler.observe('A', event('hello', timestamp=3), None)
+        await asyncio.wait_for(got.wait(), 1)
+        scheduler.close()
+        assert [e.body for e in batches[1].events] == ['hello']
+    asyncio.run(scenario())
+
+
+def test_cooldown_marker_is_inert_outside_a_turn_or_inside_text():
+    from plugins.phone_events.participation import apply_conversation_cooldown, bind_conversation_turn
+    batch = ConversationBatch(lane='A', events=(event('x'),), decisions=(), invited=True, metrics={},
+                              conversation_type='private')
+    group = replace(batch, conversation_type='group')
+    assert apply_conversation_cooldown(response_text='COOLDOWN') is None
+    with bind_conversation_turn(batch):
+        assert apply_conversation_cooldown(response_text='I will not COOLDOWN') is None
+    with bind_conversation_turn(group):
+        assert apply_conversation_cooldown(response_text='COOLDOWN') is None  # Injectable by any member.
+    assert batch.cooldown is group.cooldown is False
+    assert ParticipationSettings.from_config(
+        {'enabled': True, 'cooldown_minutes': 10}, conversation_type='private').cooldown_minutes == 10
+    with pytest.raises(ValueError):
+        ParticipationSettings.from_config({'enabled': True, 'cooldown_minutes': 0}, conversation_type='private')

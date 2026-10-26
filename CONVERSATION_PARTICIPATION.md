@@ -34,6 +34,7 @@ platforms:
         quiet_seconds: 0.75
         max_wait_seconds: 3
         min_interval_seconds: 0
+        cooldown_minutes: 5        # pause after the agent returns COOLDOWN
 ```
 
 The two modes can be enabled independently; both default to disabled. Private
@@ -130,6 +131,14 @@ batch, marked as earlier context the model ignores if the topic moved on. The
 carry clears after a reply, after five minutes without notifications in that
 conversation, or when a turn fails or is rejected, and never pushes a batch past
 `max_messages`.
+
+If a private sender keeps pushing requests the agent already declined
+(commands, device details, injected `system:` text, harassment), the agent may
+send one brief closing message and end the turn with `COOLDOWN`. That
+conversation then drops notifications for `cooldown_minutes` (default 5),
+including any that arrived during the turn, and nothing is replayed afterwards.
+Telegram receives a short notice instead of the marker. Group turns ignore the
+marker, so text injected by one member cannot mute a whole group.
 
 A reply may be split into up to three short messages, one `wechat_reply` call
 each. Follow-up calls in the same retained turn reuse the chat the previous

@@ -29,6 +29,10 @@ CARRY_SILENCE_SECONDS = 300.0
 # A reply may be split into a few messages; more is a runaway turn.
 MAX_SENDS_PER_TURN = 3
 
+# Final-response marker: the agent pauses a conversation that keeps pushing
+# requests it already declined. The lane drops notifications for cooldown_minutes.
+COOLDOWN_MARKER = 'COOLDOWN'
+
 _UNREAD_PREFIX = re.compile(r'^\[\d+(?:条)?\]')
 
 
@@ -47,6 +51,7 @@ class ParticipationSettings:
     # until an invitation, 1 answers every batch. Optional per-title overrides.
     reply_tendency: float = 0.5
     reply_tendencies: tuple[tuple[str, float], ...] = ()
+    cooldown_minutes: float = 5.0
 
     @classmethod
     def from_config(cls, raw: Any, *, conversation_type: str = 'group') -> ParticipationSettings:
@@ -67,7 +72,7 @@ class ParticipationSettings:
                 or any(not isinstance(n, str) or not n.strip().lstrip('@') for n in names)):
             raise ValueError(f'{label}.mention_names must name your WeChat account')
         values = {}
-        for key in ('quiet_seconds', 'max_wait_seconds', 'min_interval_seconds'):
+        for key in ('quiet_seconds', 'max_wait_seconds', 'min_interval_seconds', 'cooldown_minutes'):
             value = raw.get(key, getattr(defaults, key))
             if isinstance(value, bool):
                 raise ValueError(f'{label}.{key} must be a finite number')
@@ -167,6 +172,8 @@ class ConversationBatch:
     sends: int = 0
     # The model ran to completion (it replied or chose NO_REPLY).
     evaluated: bool = False
+    # The model ended the turn with COOLDOWN_MARKER.
+    cooldown: bool = False
     # Leading events repeated from earlier batches the agent stayed silent on.
     carried: int = 0
     conversation_type: str = 'group'
@@ -202,6 +209,7 @@ class _Lane:
     omitted: int = 0
     carried: list[_Observation] = field(default_factory=list)
     carried_last_at: float = 0
+    muted_until: float = float('-inf')
     timer: asyncio.TimerHandle | None = None
     running: asyncio.Task | None = None
 
@@ -264,6 +272,9 @@ class ConversationParticipation:
             delta = lines[overlap:]
         state.previous_lines = lines
         if not delta:
+            return True
+        if loop.time() < state.muted_until:
+            logger.info('Conversation %s is cooling down; notification dropped', lane)
             return True
         # WeChat prefixes unread counts ('[5]Name: text'); they are not message content.
         new_body = '\n'.join(_UNREAD_PREFIX.sub('', line) for line in delta)
@@ -346,7 +357,13 @@ class ConversationParticipation:
         finally:
             now = asyncio.get_running_loop().time()
             state.last_completed = now
-            if batch.replied:
+            if batch.cooldown:
+                # Drop what arrived during the turn too; nothing replays afterwards.
+                state.muted_until = now + self.settings.cooldown_minutes * 60
+                state.pending.clear()
+                state.carried = []
+                logger.info('Conversation %s cooling down for %g minutes', lane, self.settings.cooldown_minutes)
+            elif batch.replied:
                 state.replies.append(now)
             elif batch.evaluated and not self._closed:
                 # Silence keeps the discussion open: re-offer it with what comes next.
@@ -401,6 +418,17 @@ def guard_conversation_tool(tool_name: str, args: dict | None = None, **kwargs):
         'ordinary participation must use the observed notification context. If someone asked you to look at '
         'something, reply naturally that they should @ you first, or remain silent.'
     )}
+
+
+def apply_conversation_cooldown(response_text: str = '', **kwargs):
+    """Turn a final COOLDOWN marker into a lane cooldown and an owner notice."""
+    batch = _conversation_turn.get()
+    # Private only: in a group, injected text could mute everyone's conversation.
+    if (batch is None or batch.conversation_type != 'private'
+            or (response_text or '').strip() != COOLDOWN_MARKER):
+        return None
+    batch.cooldown = True
+    return f'已暂停与 {batch.destination} 的自动回复（对方反复提出不当请求）。'
 
 
 def record_conversation_reply(tool_name: str, args: dict | None = None, result: Any = None, **kwargs):

@@ -192,6 +192,14 @@ The host OCR fallback currently requires macOS with `swiftc`; `setup.sh`
 builds and installs it automatically. Other platforms continue using Android's
 accessibility hierarchy and screenshots.
 
+Experimental [notification-only group participation](GROUP_PARTICIPATION.md)
+buffers received WeChat group notifications per conversation, then lets one
+agent turn choose silence or a natural reply. Buffering uses neither the phone
+nor a model. It is opt-in, preserves running tasks, and relies on WeChat's
+notification behavior for muted groups; it cannot read the mute switch or
+recover missing foreground notifications. See the guide for both configuration
+and explicit phone-policy authorization.
+
 For automated task inboxes, add an `event_rules` entry to your copied
 `~/.hermes/phone-policy.yaml`. Mark only an authenticated, explicit trigger as
 `instruction_source: true`, and allow only the actions that workflow needs.

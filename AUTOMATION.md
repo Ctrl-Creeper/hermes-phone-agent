@@ -13,6 +13,21 @@ individually so each retains its own authenticated policy and event identity.
 This integration uses Hermes' `_session_tasks` map; verify it after upgrading
 Hermes with the offline smoke check below.
 
+## Optional group notification batching
+
+[Group participation](GROUP_PARTICIPATION.md) adds an opt-in admission layer
+before gateway dispatch. Authorized group notifications are buffered without
+phone/model work. Per-group timers and in-flight batches are independent;
+started turns are never cancelled because another message arrives. A batch
+chooses `NO_REPLY` or writes its reply in the same agent call. Destination-bound
+hooks restrict group turns to supported composite phone actions, and attempted
+sends update participation statistics. Shared Telegram-topic routing is rejected
+for this mode to prevent conversation-history merging.
+
+This admission layer does not change the retained device ownership described
+above. An existing turn that already owns the phone can still delay another
+turn's physical operations, including while the owner is researching.
+
 ## Durable reply receipts
 
 The phone-events adapter derives a host-only identity from the device, package,

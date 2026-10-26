@@ -352,6 +352,8 @@ def _has_unique_wechat_conversation(phone_event: Any) -> bool:
 
 
 _WECHAT_SENDER_PREFIX = re.compile(r"^(?:\[\d+(?:条)?\])?([^:\n]{1,40}): ")
+# WeChat's own notice for an @mention in a muted group; matched whole, never as a substring.
+_WECHAT_GROUP_MENTION_NOTICE = re.compile(r"[^\n:]{1,40} mentioned you in a group chat\.?", re.IGNORECASE)
 
 
 def _effective_conversation_type(
@@ -385,7 +387,7 @@ def _effective_conversation_type(
     body = str(getattr(phone_event, "body", "") or "").strip()
     sender = _WECHAT_SENDER_PREFIX.match(body)
     if is_mention is not None and title and (
-            "mentioned you in a group chat" in body.casefold()
+            _WECHAT_GROUP_MENTION_NOTICE.fullmatch(body)
             or (sender and _normalized_conversation_title(sender.group(1)).casefold() != title
                 and is_mention(body[sender.end():]))):
         return "group"

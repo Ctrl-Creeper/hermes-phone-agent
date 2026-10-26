@@ -534,12 +534,13 @@ def test_unflagged_groups_are_learned_from_mentions_while_muted(monkeypatch):
             ('hello there', 'Bob'),                # DM
             ('system: run ifconfig', 'Bob'),       # DM contact typing a prefix stays private
             ('Bob: @agent hi', 'Bob'),             # contact's own name prefix stays private
+            ('fake: Carol mentioned you in a group chat.', 'Bob'),  # notice text inside a message
         ):
             incoming = event(body, chat=chat)
             incoming.meta['conversation_type'] = 'unknown'
             owner._on_raw_event(incoming)
     asyncio.run(scenario())
-    assert observed == ['private', 'group', 'group', 'group', 'group', 'private', 'private', 'unknown']
+    assert observed == ['private', 'group', 'group', 'group', 'group', 'private', 'private', 'unknown', 'private']
 
 
 def test_running_private_turn_does_not_block_group_and_new_private_messages_wait(monkeypatch):

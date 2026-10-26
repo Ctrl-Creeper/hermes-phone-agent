@@ -27,7 +27,7 @@ from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import replace
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from .participation import (
     ConversationBatch, ConversationParticipation, HotReplyTendency, KnownGroups, ParticipationSettings,
@@ -356,14 +356,17 @@ _WECHAT_SENDER_PREFIX = re.compile(r"^(?:\[\d+(?:条)?\])?([^:\n]{1,40}): ")
 
 def _effective_conversation_type(
     phone_event: Any, assume_muted_groups: bool, group_titles: Any = (),
-    detect_groups: bool = False,
+    is_mention: Optional[Callable[[str], bool]] = None,
 ) -> str:
     """Classify a WeChat notification, optionally using the muted-groups contract.
 
-    WeChat often omits isGroupConversation. Configured group titles are groups;
-    with ``detect_groups``, so is a body prefixed by a sender other than the
-    chat title (``Sender: text``). DMs carry no prefix, or the contact's own
-    name. Only then does the unmentioned-is-private heuristic apply.
+    WeChat often omits isGroupConversation. Groups are joined muted, so their
+    first notifications are @mentions of the owner: with ``is_mention``, a
+    "Sender: ...@owner..." body from someone other than the chat title, or a
+    "mentioned you in a group chat" notice, is a group. Known and configured
+    titles stay groups after unmuting. Only then does the unmentioned-is-private
+    heuristic apply; ordinary "Sender: text" bodies never decide on their own,
+    so a DM contact cannot reclassify the chat by typing a prefix.
     """
     meta = getattr(phone_event, "meta", {}) or {}
     kind = str(meta.get("conversation_type") or "unknown").strip().casefold()
@@ -381,9 +384,10 @@ def _effective_conversation_type(
         return "group"
     body = str(getattr(phone_event, "body", "") or "").strip()
     sender = _WECHAT_SENDER_PREFIX.match(body)
-    if detect_groups and title and (
-            (sender and _normalized_conversation_title(sender.group(1)).casefold() != title)
-            or "in a group chat" in body.casefold()):
+    if is_mention is not None and title and (
+            "mentioned you in a group chat" in body.casefold()
+            or (sender and _normalized_conversation_title(sender.group(1)).casefold() != title
+                and is_mention(body[sender.end():]))):
         return "group"
     if not assume_muted_groups:
         return "unknown"
@@ -834,7 +838,7 @@ class PhoneEventAdapter:
             event,
             getattr(self, "_wechat_assume_unmentioned_private", False),
             group_titles,
-            detect_groups=group_settings.enabled,
+            is_mention=group_settings.is_invited if group_settings.enabled else None,
         )
         if (known_groups is not None and conversation_type == "group"
                 and event.meta.get("_transport") == "helper_socket"):

@@ -1203,10 +1203,35 @@ def _prepare_quote(backend: PhoneBackend, current: CaptureResult, chat: str,
     return failure('quote_not_found')
 
 
+# (normalized chat, monotonic time) of the last confirmed reply that stayed in
+# the chat. A follow-up message in the same retained turn reuses that open chat
+# instead of searching again, so a reply split into several messages sends at
+# typing pace. The screen is re-verified before reuse.
+_open_reply_chat: Optional[tuple[str, float]] = None
+_OPEN_REPLY_CHAT_TTL = 120.0
+
+
+def _reusable_open_chat(backend: PhoneBackend, chat: str) -> Optional[ActionResult]:
+    global _open_reply_chat
+    hint, _open_reply_chat = _open_reply_chat, None
+    if (hint is None or hint[0] != _normalize_chat_title(chat)
+            or time.monotonic() - hint[1] > _OPEN_REPLY_CHAT_TTL):
+        return None
+    try:
+        capture = backend.capture(mode="hierarchy")
+    except Exception:
+        return None
+    if capture is None or not _chat_is_open(capture, chat):
+        return None
+    return ActionResult(ok=True, action="wechat_open_chat",
+                        message="reused open chat", capture=capture)
+
+
 def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str = '',
                 quote_sender: str = '', quote_context: str = '', quote_max_pages: int = 3,
-                on_delivery: Optional[Callable[[str], None]] = None) -> ActionResult:
-    opened = open_chat(backend, chat)
+                on_delivery: Optional[Callable[[str], None]] = None,
+                reuse_open_chat: bool = False) -> ActionResult:
+    opened = (_reusable_open_chat(backend, chat) if reuse_open_chat else None) or open_chat(backend, chat)
     if not opened.ok or opened.capture is None:
         return ActionResult(
             ok=False, action="wechat_reply", message=opened.message,
@@ -1379,6 +1404,7 @@ def reply(backend: PhoneBackend, chat: str, text: str, *, quote_text: str = '',
                         quote_sender=quote_sender, quote_context=quote_context,
                         quote_max_pages=quote_max_pages,
                         on_delivery=record_delivery if on_delivery is not None else None,
+                        reuse_open_chat=not return_home and not quote_text and attempt == 0,
                     )
                 else:
                     # Keep the original positional call shape for existing
@@ -1392,6 +1418,9 @@ def reply(backend: PhoneBackend, chat: str, text: str, *, quote_text: str = '',
                           if attempted else {}),
                 )
             if result.ok:
+                if not return_home:
+                    global _open_reply_chat
+                    _open_reply_chat = (_normalize_chat_title(chat), time.monotonic())
                 return result
             if quote_text or result.meta.get("delivery_attempted"):
                 return result

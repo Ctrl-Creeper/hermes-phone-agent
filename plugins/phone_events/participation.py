@@ -1,0 +1,422 @@
+"""Host-only notification batching and turn scope for WeChat conversations.
+
+All scheduler methods run on the gateway loop. Receiving a notification never
+reads the phone or calls a model. Started batches run to completion.
+"""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+import math
+import re
+from collections import OrderedDict, deque
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
+from typing import Any, Awaitable, Callable
+
+from .event_filter import PhoneEvent
+from .redact import redact_sensitive, truncate_notification_body
+
+logger = logging.getLogger(__name__)
+
+# Observations the agent stayed silent on are re-offered with the next batch
+# unless the conversation went quiet for this long in between.
+CARRY_SILENCE_SECONDS = 300.0
+
+# A reply may be split into a few messages; more is a runaway turn.
+MAX_SENDS_PER_TURN = 3
+
+_UNREAD_PREFIX = re.compile(r'^\[\d+(?:条)?\]')
+
+
+@dataclass(frozen=True)
+class ParticipationSettings:
+    enabled: bool = False
+    conversation_type: str = 'group'
+    mention_names: tuple[str, ...] = ()
+    quiet_seconds: float = 2.0
+    max_wait_seconds: float = 8.0
+    min_interval_seconds: float = 30.0
+    max_messages: int = 64
+    # Group titles to classify as groups when WeChat omits isGroupConversation.
+    titles: tuple[str, ...] = ()
+    # Owner-set 0..1 inclination to reply to uninvited batches: 0 holds them
+    # until an invitation, 1 answers every batch. Optional per-title overrides.
+    reply_tendency: float = 0.5
+    reply_tendencies: tuple[tuple[str, float], ...] = ()
+
+    @classmethod
+    def from_config(cls, raw: Any, *, conversation_type: str = 'group') -> ParticipationSettings:
+        if conversation_type not in {'group', 'private'}:
+            raise ValueError('participation conversation_type must be group or private')
+        defaults = (cls(conversation_type='private', quiet_seconds=.75,
+                        max_wait_seconds=3, min_interval_seconds=0)
+                    if conversation_type == 'private' else cls())
+        label = f'{conversation_type}_participation'
+        if raw is None:
+            return defaults
+        if not isinstance(raw, dict):
+            raise ValueError(f'{label} must be a mapping')
+        if raw.get('enabled', False) is not True:
+            return defaults
+        names = raw.get('mention_names', [])
+        if (not isinstance(names, list) or (conversation_type == 'group' and not names)
+                or any(not isinstance(n, str) or not n.strip().lstrip('@') for n in names)):
+            raise ValueError(f'{label}.mention_names must name your WeChat account')
+        values = {}
+        for key in ('quiet_seconds', 'max_wait_seconds', 'min_interval_seconds'):
+            value = raw.get(key, getattr(defaults, key))
+            if isinstance(value, bool):
+                raise ValueError(f'{label}.{key} must be a finite number')
+            try:
+                value = float(value)
+            except (ValueError, TypeError):
+                raise ValueError(f'{label}.{key} must be a finite number') from None
+            if not math.isfinite(value) or value < 0 or (key != 'min_interval_seconds' and value == 0):
+                raise ValueError(f'{label}.{key} must be positive (interval may be zero)')
+            values[key] = value
+        count = raw.get('max_messages', defaults.max_messages)
+        if type(count) is not int or not 1 <= count <= 256:
+            raise ValueError(f'{label}.max_messages must be between 1 and 256')
+        if values['max_wait_seconds'] < values['quiet_seconds']:
+            raise ValueError(f'{label}.max_wait_seconds must be at least quiet_seconds')
+        titles = raw.get('titles', [])
+        if (not isinstance(titles, list) or (titles and conversation_type != 'group')
+                or any(not isinstance(t, str) or not t.strip() for t in titles)):
+            raise ValueError(f'{label}.titles must list group conversation titles')
+        tendency, tendencies = _parse_reply_tendency(raw.get('reply_tendency', defaults.reply_tendency),
+                                                     label, conversation_type)
+        return cls(enabled=True, conversation_type=conversation_type, mention_names=tuple(n.strip().lstrip('@') for n in names),
+                   max_messages=count, titles=tuple(t.strip() for t in titles),
+                   reply_tendency=tendency, reply_tendencies=tendencies, **values)
+
+    def tendency_for(self, title: str) -> float:
+        key = title.strip().casefold()
+        return next((v for t, v in self.reply_tendencies if t == key), self.reply_tendency)
+
+    def is_invited(self, text: str) -> bool:
+        return self.conversation_type == 'private' or any(re.search(r'@' + re.escape(name) + r'(?![\w])', text, re.IGNORECASE)
+                   for name in self.mention_names)
+
+
+def _tendency_value(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+        raise ValueError(f'{label}.reply_tendency values must be numbers from 0 to 1')
+    return float(value)
+
+
+def _parse_reply_tendency(raw: Any, label: str, conversation_type: str):
+    """Accept ``0.6`` or ``{default: 0.4, "Group title": 0.8}``."""
+    if isinstance(raw, dict):
+        if conversation_type != 'group':
+            raise ValueError(f'{label}.reply_tendency per-title values are group-only')
+        default = _tendency_value(raw.get('default', 0.5), label)
+        overrides = tuple((str(t).strip().casefold(), _tendency_value(v, label))
+                          for t, v in raw.items() if t != 'default')
+        if any(not t for t, _ in overrides):
+            raise ValueError(f'{label}.reply_tendency titles must be non-empty')
+        return default, overrides
+    return _tendency_value(raw, label), ()
+
+
+class HotReplyTendency:
+    """Read group_participation.reply_tendency from config.yaml when it changes.
+
+    Lets the owner retune groups without a gateway restart. An unreadable or
+    invalid edit keeps the last good values.
+    """
+
+    def __init__(self, path: Any, fallback: ParticipationSettings) -> None:
+        self._path = path
+        self._mtime: float | None = None
+        self._values = (fallback.reply_tendency, fallback.reply_tendencies)
+
+    def __call__(self, title: str) -> float:
+        try:
+            mtime = self._path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime is not None and mtime != self._mtime:
+            self._mtime = mtime
+            try:
+                import yaml
+                raw = yaml.safe_load(self._path.read_text(encoding='utf-8')) or {}
+                group = (((raw.get('platforms') or {}).get('phone_events') or {})
+                         .get('extra') or {}).get('group_participation') or {}
+                if 'reply_tendency' in group:
+                    self._values = _parse_reply_tendency(
+                        group['reply_tendency'], 'group_participation', 'group')
+            except Exception as exc:
+                logger.warning('Keeping previous reply_tendency; config reload failed: %s', exc)
+        default, overrides = self._values
+        key = title.strip().casefold()
+        return next((v for t, v in overrides if t == key), default)
+
+
+@dataclass
+class ConversationBatch:
+    lane: str
+    events: tuple[PhoneEvent, ...]
+    decisions: tuple[Any, ...]
+    invited: bool
+    metrics: dict[str, Any]
+    replied: bool = False
+    sends: int = 0
+    # The model ran to completion (it replied or chose NO_REPLY).
+    evaluated: bool = False
+    # Leading events repeated from earlier batches the agent stayed silent on.
+    carried: int = 0
+    conversation_type: str = 'group'
+    reply_tendency: float = 0.5
+    # Kept only for host policy revalidation, never formatted into model input.
+    policy_inputs: tuple[dict[str, str], ...] = field(default=(), repr=False)
+
+    @property
+    def destination(self) -> str:
+        return str(self.events[-1].meta.get('conversation_title') or self.events[-1].title).strip()
+
+
+@dataclass(frozen=True)
+class _Observation:
+    event: PhoneEvent
+    decision: Any
+    invited: bool
+    policy_input: dict[str, str] = field(repr=False)
+    at: float = 0  # Loop time of arrival.
+
+
+@dataclass
+class _Lane:
+    title: str
+    pending: list[_Observation] = field(default_factory=list)
+    seen: OrderedDict[str, None] = field(default_factory=OrderedDict)
+    previous_lines: list[str] = field(default_factory=list)
+    arrivals: deque[float] = field(default_factory=lambda: deque(maxlen=512))
+    replies: deque[float] = field(default_factory=lambda: deque(maxlen=128))
+    first_at: float = 0
+    last_at: float = 0
+    last_completed: float = float('-inf')
+    omitted: int = 0
+    carried: list[_Observation] = field(default_factory=list)
+    carried_last_at: float = 0
+    timer: asyncio.TimerHandle | None = None
+    running: asyncio.Task | None = None
+
+
+class ConversationParticipation:
+    def __init__(self, settings: ParticipationSettings,
+                 dispatch: Callable[[ConversationBatch], Awaitable[None]], *, redact_otp: bool = True,
+                 tendency: Callable[[str], float] | None = None) -> None:
+        self._redact_otp = redact_otp
+        self.settings = settings
+        self._tendency = tendency or settings.tendency_for
+        self._dispatch = dispatch
+        self._lanes: dict[str, _Lane] = {}
+        self._closed = False
+
+    def observe(self, lane: str, event: PhoneEvent, decision: Any,
+                policy_input: dict[str, str] | None = None) -> bool:
+        if self._closed:
+            return False
+        loop = asyncio.get_running_loop()
+        title = str(event.meta.get('conversation_title') or event.title).strip()
+        state = self._lanes.get(lane)
+        if state is None:
+            if len(self._lanes) >= 128:
+                # Evict idle lanes, including chatter held at reply_tendency 0;
+                # never running, scheduled or invited work.
+                idle = next((k for k, s in self._lanes.items()
+                             if s.running is None and s.timer is None
+                             and not any(o.invited for o in s.pending)), None)
+                if idle is None:
+                    logger.warning('Conversation participation capacity reached; observation not admitted')
+                    return False
+                self._lanes.pop(idle)
+            state = self._lanes[lane] = _Lane(title=title)
+        if state.title != title:
+            logger.warning('Conflicting conversation titles for one notification identity; not merging')
+            return False
+        policy_input = dict(policy_input) if policy_input is not None else {
+            'package': event.package, 'event_type': event.event_type,
+            'title': event.title, 'body': event.body, 'conversation_type': self.settings.conversation_type,
+        }
+        identity = hashlib.sha256(json.dumps([
+            event.meta.get('notification_key'), event.timestamp,
+            policy_input['title'], policy_input['body'],
+        ], ensure_ascii=False).encode()).hexdigest()
+        if identity in state.seen:
+            return True
+        state.seen[identity] = None
+        if len(state.seen) > 512:
+            state.seen.popitem(last=False)
+
+        # Android can replace one notification with overlapping message lines.
+        lines = policy_input['body'].splitlines()
+        delta = lines
+        if len(lines) > 1:
+            overlap = 0
+            for size in range(1, min(len(lines), len(state.previous_lines)) + 1):
+                if state.previous_lines[-size:] == lines[:size]:
+                    overlap = size
+            delta = lines[overlap:]
+        state.previous_lines = lines
+        if not delta:
+            return True
+        # WeChat prefixes unread counts ('[5]Name: text'); they are not message content.
+        new_body = '\n'.join(_UNREAD_PREFIX.sub('', line) for line in delta)
+        invited = self.settings.is_invited(new_body)
+        observed = replace(event, body=truncate_notification_body(
+            redact_sensitive(new_body, enable_otp=self._redact_otp)), meta=dict(event.meta))
+        now = loop.time()
+        state.arrivals.append(now)
+        if not state.pending:
+            state.first_at = now
+        state.last_at = now
+        state.pending.append(_Observation(observed, decision, invited, policy_input, now))
+        if len(state.pending) > self.settings.max_messages:
+            index = next((i for i, observation in enumerate(state.pending) if not observation.invited), 0)
+            state.pending.pop(index)
+            state.omitted += 1
+        self._schedule(lane, state)
+        return True
+
+    def _schedule(self, lane: str, state: _Lane) -> None:
+        if state.timer is not None:
+            state.timer.cancel()
+            state.timer = None
+        if self._closed or state.running is not None or not state.pending:
+            return
+        loop = asyncio.get_running_loop()
+        invited = any(observation.invited for observation in state.pending)
+        if (not invited and self.settings.conversation_type == 'group'
+                and self._tendency(state.title) <= 0):
+            return  # Hold uninvited chatter (bounded by max_messages) as context for the next invitation.
+        if invited and self.settings.conversation_type == 'group':
+            due = min(state.first_at + .25, state.last_at + self.settings.quiet_seconds)
+        else:
+            due = max(min(state.first_at + self.settings.max_wait_seconds,
+                          state.last_at + self.settings.quiet_seconds),
+                      state.last_completed + self.settings.min_interval_seconds)
+        state.timer = loop.call_later(max(0, due - loop.time()), self._start, lane)
+
+    def _start(self, lane: str) -> None:
+        state = self._lanes[lane]
+        state.timer = None
+        if self._closed or state.running is not None or not state.pending:
+            return
+        now = asyncio.get_running_loop().time()
+        for times in (state.arrivals, state.replies):
+            while times and times[0] < now - 300:
+                times.popleft()
+        fresh, state.pending = state.pending, []
+        if state.carried and state.first_at - state.carried_last_at > CARRY_SILENCE_SECONDS:
+            state.carried = []
+        budget = max(0, self.settings.max_messages - len(fresh))
+        carried = state.carried[-budget:] if budget else []  # [-0:] would keep everything
+        state.carried = []
+        pending = carried + fresh
+        batch = ConversationBatch(
+            carried=len(carried),
+            lane=lane, conversation_type=self.settings.conversation_type, events=tuple(o.event for o in pending),
+            reply_tendency=self._tendency(state.title),
+            decisions=tuple(o.decision for o in pending),
+            invited=any(o.invited for o in fresh),
+            policy_inputs=tuple(o.policy_input for o in pending),
+            metrics={
+                'observed_notifications': len(fresh),
+                'notifications_last_minute': sum(t >= now - 60 for t in state.arrivals),
+                'seconds_since_last_notification': round(now - state.last_at, 2),
+                'replies_last_five_minutes': len(state.replies),
+                'omitted_notifications': state.omitted,
+            },
+        )
+        state.omitted = 0
+        state.running = asyncio.create_task(self._run(lane, state, batch, pending))
+
+    async def _run(self, lane: str, state: _Lane, batch: ConversationBatch,
+                   observations: list[_Observation] = ()) -> None:
+        try:
+            await self._dispatch(batch)
+        except Exception:
+            # A failed batch must not strand another group or cause a retry loop.
+            logger.exception('Conversation participation batch failed')
+        finally:
+            now = asyncio.get_running_loop().time()
+            state.last_completed = now
+            if batch.replied:
+                state.replies.append(now)
+            elif batch.evaluated and not self._closed:
+                # Silence keeps the discussion open: re-offer it with what comes next.
+                state.carried = list(observations)[-self.settings.max_messages:]
+                state.carried_last_at = observations[-1].at if observations else now
+            state.running = None
+            self._schedule(lane, state)
+
+    def close(self) -> None:
+        """Discard unsent observations and timers; never cancel a started turn."""
+        self._closed = True
+        for state in self._lanes.values():
+            if state.timer is not None:
+                state.timer.cancel()
+                state.timer = None
+            state.pending.clear()
+            state.carried.clear()
+
+
+_conversation_turn: ContextVar[ConversationBatch | None] = ContextVar('phone_conversation_turn', default=None)
+
+
+@contextmanager
+def bind_conversation_turn(batch: ConversationBatch | None):
+    token = _conversation_turn.set(batch)
+    try:
+        yield
+    finally:
+        _conversation_turn.reset(token)
+
+
+def guard_conversation_tool(tool_name: str, args: dict | None = None, **kwargs):
+    batch = _conversation_turn.get()
+    if batch is None:
+        return None
+    args = args if isinstance(args, dict) else {}
+    if tool_name in {'web_search', 'web_extract'}:
+        if batch.invited:
+            return None
+    elif tool_name == 'phone_use':
+        action = args.get('action')
+        if action == 'wechat_reply' and batch.sends >= MAX_SENDS_PER_TURN:
+            return {'action': 'block', 'message': (
+                f'This turn already sent {MAX_SENDS_PER_TURN} messages; finish without sending more.')}
+        allowed = action == 'wechat_reply' or (batch.invited and action == 'wechat_collect_context')
+        target = args.get('chat')
+        if allowed and isinstance(target, str) and target.strip() == batch.destination:
+            return None
+    return {'action': 'block', 'message': (
+        'This turn may reply only to its bound conversation. '
+        'Only private or explicitly invited group turns may read that conversation, view images or research; '
+        'ordinary participation must use the observed notification context. If someone asked you to look at '
+        'something, reply naturally that they should @ you first, or remain silent.'
+    )}
+
+
+def record_conversation_reply(tool_name: str, args: dict | None = None, result: Any = None, **kwargs):
+    batch = _conversation_turn.get()
+    if batch is None or tool_name != 'phone_use' or not isinstance(args, dict):
+        return
+    target = args.get('chat')
+    if (args.get('action') != 'wechat_reply' or not isinstance(target, str)
+            or target.strip() != batch.destination):
+        return
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (ValueError, TypeError):
+            return
+    meta = result.get('meta') if isinstance(result, dict) else None
+    if isinstance(meta, dict) and meta.get('delivery_attempted') and not meta.get('duplicate_suppressed'):
+        batch.replied = True
+        batch.sends += 1

@@ -4765,3 +4765,43 @@ def test_durable_trusted_reply_skips_per_action_home(monkeypatch, tmp_path):
     monkeypatch.setattr(phone_tool, "_resolve_android_serial", lambda: "emulator-5554")
     phone_tool._durable_wechat_reply(object(), {"chat": "群聊", "text": "你好"}, "identity-hash")
     assert captured.get("return_home") is False
+
+
+def test_wechat_split_reply_reuses_open_chat_only_when_verified(monkeypatch):
+    # A reply split into several messages sends the follow-ups in the chat the
+    # previous confirmed reply left open, instead of searching for it again.
+    opened = []
+
+    def reply_once(backend, chat, text, **kwargs):
+        return phone_tool.ActionResult(
+            ok=True, action="wechat_reply", message="sent",
+            meta={"delivery_attempted": True, "delivery_status": "confirmed"})
+
+    class Backend:
+        def capture(self, mode):
+            return phone_tool.CaptureResult(mode=mode, width=1080, height=2400)
+
+    monkeypatch.setattr(wechat_module, "_reply_once", reply_once)
+    assert wechat_module.reply(Backend(), "群聊", "第一条", return_home=False).ok
+    hint = wechat_module._open_reply_chat
+    assert hint is not None
+    monkeypatch.undo()
+
+    def open_chat(backend, chat):
+        opened.append(chat)
+        return phone_tool.ActionResult(ok=False, action="wechat_open_chat", message="stop")
+
+    monkeypatch.setattr(wechat_module, "open_chat", open_chat)
+    monkeypatch.setattr(wechat_module, "_prepare_text_input", lambda backend, capture: phone_tool.ActionResult(
+        ok=False, action="wechat_reply", message="stop"))
+    for chat_open, expected_searches in ((True, 0), (False, 1)):
+        monkeypatch.setattr(wechat_module, "_chat_is_open", lambda capture, chat, v=chat_open: v)
+        wechat_module._open_reply_chat = hint
+        opened.clear()
+        wechat_module._reply_once(Backend(), "群聊", "第二条", reuse_open_chat=True)
+        assert len(opened) == expected_searches
+    # Hints are single-use and scoped to the chat they were confirmed in.
+    wechat_module._open_reply_chat = hint
+    opened.clear()
+    wechat_module._reply_once(Backend(), "别的群", "x", reuse_open_chat=True)
+    assert opened == ["别的群"] and wechat_module._open_reply_chat is None

@@ -64,7 +64,8 @@ class EventFilter:
         allowed = set(p.strip() for p in pkgs_str.split(",") if p.strip()) or None
         return cls(max_events_per_second=rate, allowed_packages=allowed)
 
-    def should_forward(self, event: PhoneEvent) -> bool:
+    def should_forward(self, event: PhoneEvent, *, rate_limit: bool = True,
+                       deduplicate: bool = True) -> bool:
         """Return True if the event should be forwarded to the agent."""
         with self._lock:
             now = time.monotonic()
@@ -78,9 +79,13 @@ class EventFilter:
             if now - self._event_count_window_start > 1.0:
                 self._event_count = 0
                 self._event_count_window_start = now
-            self._event_count += 1
-            if self._event_count > self._max_rate:
+            if rate_limit:
+                self._event_count += 1
+            if rate_limit and self._event_count > self._max_rate:
                 return False
+
+            if not deduplicate:
+                return True
 
             # Deduplication
             key = event.dedup_key

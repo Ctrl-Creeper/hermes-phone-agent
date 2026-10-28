@@ -20,6 +20,7 @@ _SEND_LABELS = frozenset({"发送", "send", "发送消息", "send message"})
 _VOICE_INPUT_LABELS = frozenset({"hold to talk", "按住说话"})
 _VOICE_TRANSCRIPTION_PREFIXES = ("tap to convert to text", "轻触转文字")
 _MIN_TITLE_SIMILARITY = 0.80
+_LONG_TITLE_OCR_SIMILARITY = 0.60
 _SEARCH_RESULT_SECTIONS = frozenset({
     "top hits", "最佳匹配", "最常使用",
     "contacts", "联系人",
@@ -69,6 +70,38 @@ def _label(element: UIElement) -> str:
     return (element.text or element.content_desc or "").strip()
 
 
+def _title_ocr_matches(wanted: str, observed: str) -> bool:
+    """Match a long title when OCR drops a middle fragment.
+
+    WeChat's narrow title bar can preserve the beginning and end of a long
+    title while omitting several middle glyphs. Keep the normal strict ratio
+    for ordinary names; the relaxed path requires both distinctive anchors and
+    only applies to long, non-emoji titles so it cannot turn a short prefix
+    into a destination match.
+    """
+    if not wanted or not observed or len(wanted) < 16 or len(observed) < 9:
+        return False
+    if _has_emoji(wanted):
+        return False
+    prefix_len = min(5, len(wanted) // 3)
+    suffix_len = min(4, len(wanted) // 4)
+    if prefix_len < 4 or suffix_len < 3:
+        return False
+    prefix = wanted[:prefix_len]
+    suffix = wanted[-suffix_len:]
+    prefix_pos = observed.find(prefix)
+    suffix_pos = observed.rfind(suffix)
+    # A back arrow/member count may precede the OCR title, and a menu glyph
+    # may trail it. Permit only a short amount of such chrome around the two
+    # anchors; the title itself must still be in order.
+    if (prefix_pos < 0 or suffix_pos < prefix_pos + prefix_len
+            or prefix_pos > 6
+            or len(observed) - (suffix_pos + suffix_len) > 2):
+        return False
+    core = observed[prefix_pos:suffix_pos + suffix_len]
+    return SequenceMatcher(None, wanted, core).ratio() >= _LONG_TITLE_OCR_SIMILARITY
+
+
 def _find_text(elements: list[UIElement], text: str) -> Optional[UIElement]:
     if _EMOJI_PLACEHOLDER.search(text):
         matches = [e for e in elements if _matches_placeholder_title(_label(e), text)]
@@ -101,6 +134,44 @@ def _find_text(elements: list[UIElement], text: str) -> Optional[UIElement]:
     if len(matches) > 1 and matches[0][0] - matches[1][0] < 0.05:
         return None
     return matches[0][1]
+
+
+def _search_section_name(value: str) -> str:
+    """Recognize OCR-decorated WeChat search section labels."""
+    label = re.sub(r"\s+", " ", _label_value(value).casefold()).strip()
+    for section in sorted(_SEARCH_RESULT_SECTIONS, key=len, reverse=True):
+        if label == section or label.endswith(" " + section):
+            return section
+    return ""
+
+
+def _label_value(value: str) -> str:
+    """Normalize a raw label for helpers that do not receive a UI element."""
+    return str(value or "").strip()
+
+
+def _normalize_search_result_title(value: str) -> str:
+    """Remove host-OCR bullets and visual ellipses from a chat result."""
+    label = _label_value(value)
+    label = re.sub(r"^.*?[•·]\s*", "", label)
+    label = re.sub(r"[.…]{2,}", "", label)
+    return _normalize_chat_title(label)
+
+
+def _find_chat_search_result(elements: list[UIElement], chat: str) -> Optional[UIElement]:
+    """Match a chat row after removing result-row decoration and truncation."""
+    wanted = _normalize_chat_title(chat)
+    candidates = [
+        (SequenceMatcher(None, wanted, _normalize_search_result_title(_label(e))).ratio(), e)
+        for e in elements
+        if _normalize_search_result_title(_label(e))
+    ]
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    if not candidates or candidates[0][0] < _MIN_TITLE_SIMILARITY:
+        return None
+    if len(candidates) > 1 and candidates[0][0] - candidates[1][0] < 0.05:
+        return None
+    return candidates[0][1]
 
 
 def _normalize_chat_title(value: str) -> str:
@@ -198,7 +269,7 @@ def _find_chat_header(capture: CaptureResult, chat: str) -> Optional[UIElement]:
             and not _has_emoji(wanted)
             and SequenceMatcher(None, wanted, observed).ratio()
             >= _MIN_TITLE_SIMILARITY
-        ):
+        ) or _title_ocr_matches(wanted, observed):
             return element
     if _matches_recent_symbol_chat(chat, capture):
         return min(
@@ -561,17 +632,17 @@ def _search_for_chat(
 
     def chat_results(value: CaptureResult) -> tuple[list[UIElement], bool]:
         sections = sorted((e for e in value.elements
-                           if _label(e).casefold() in _SEARCH_RESULT_SECTIONS),
+                           if _search_section_name(_label(e))),
                           key=lambda e: e.bounds[1])
 
         def is_chat_result(element: UIElement) -> bool:
-            if _label(element).casefold() in _SEARCH_RESULT_SECTIONS:
+            if _search_section_name(_label(element)):
                 return False
             preceding = [e for e in sections if e.bounds[1] <= element.bounds[1]]
             # Some hierarchy/OCR frames omit all section labels. Preserve that
             # path; when sections exist, never treat history snippets as names.
             return not sections or bool(
-                preceding and _label(preceding[-1]).casefold() in _CHAT_RESULT_SECTIONS
+                preceding and _search_section_name(_label(preceding[-1])) in _CHAT_RESULT_SECTIONS
             )
 
         return [
@@ -585,7 +656,10 @@ def _search_for_chat(
 
     def find_result(value: CaptureResult) -> Optional[UIElement]:
         # Always match the full requested name, even after a keyword search.
-        matched = _find_text(chat_results(value)[0], chat)
+        result_elements = chat_results(value)[0]
+        matched = _find_chat_search_result(result_elements, chat)
+        if matched is None:
+            matched = _find_text(result_elements, chat)
         if matched is not None:
             return matched
         if _is_symbol_only_title(chat):

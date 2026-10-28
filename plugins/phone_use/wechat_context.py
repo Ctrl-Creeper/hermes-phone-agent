@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from .backend import ActionResult, CaptureResult, PhoneBackend
-from .host_ocr import analyze_image
+from .host_ocr import analyze_image, recognize_text
 from .wechat import _find_chat_header, _is_search_page, _normalize_chat_title, open_chat, quote_message_candidates
 
 logger = logging.getLogger(__name__)
@@ -197,6 +197,12 @@ def _same_chat_title(observed: str, chat: str) -> bool:
     return diffs <= max(1, len(a) // 8)
 
 
+def _has_message_input(capture: CaptureResult) -> bool:
+    return any(e.class_name == "host.ocr.MessageInput" or (
+        "edittext" in e.class_name.casefold() and e.bounds[1] > capture.height * 0.5
+    ) for e in capture.elements)
+
+
 def _verified_chat(capture: CaptureResult, chat: str) -> bool:
     header = _find_chat_header(capture, chat)
     return (
@@ -206,10 +212,44 @@ def _verified_chat(capture: CaptureResult, chat: str) -> bool:
         and not _is_search_page(capture)
         and header is not None
         and _same_chat_title(header.text or header.content_desc or "", chat)
-        and any(e.class_name == "host.ocr.MessageInput" or (
-            "edittext" in e.class_name.casefold() and e.bounds[1] > capture.height * 0.5
-        ) for e in capture.elements)
+        and _has_message_input(capture)
     )
+
+
+def _same_activity_image_preview(capture: CaptureResult) -> bool:
+    """Recognize the viewer toolbar when WeChat retains LauncherUI.
+
+    A missing chat header alone is never viewer evidence: notification banners
+    can obscure it. Require the original-image control in its bottom-left slot
+    and no composer. Read pixels from this capture, not a later UI dump, since
+    the viewer toolbar auto-hides.
+    """
+    if capture.current_package != "com.tencent.mm" or _has_message_input(capture):
+        return False
+    elements = capture.elements
+    if not elements and capture.png_b64:
+        elements = recognize_text(capture.png_b64)
+    return any(
+        e.bounds[1] >= capture.height * 0.88
+        and e.bounds[0] < capture.width * 0.4
+        and re.fullmatch(r"(?:Full Image|查看原图|原图)(?:\s*[（(]?\d[\d.,]*\s*[KMGkmg]?[Bb]?[）)]?)?",
+                         (e.text or e.content_desc).strip(), re.I)
+        for e in elements
+    )
+
+
+def _wait_for_chat_header(backend: PhoneBackend, capture: CaptureResult,
+                          chat: str, mode: str) -> CaptureResult:
+    """Wait out a transient banner; never navigate to recover an unknown chat."""
+    for _ in range(3):
+        if (_verified_chat(capture, chat)
+                or capture.current_package != "com.tencent.mm"
+                or not _has_message_input(capture)
+                or _find_chat_header(capture, chat) is not None):
+            break
+        backend.wait(1.0)
+        capture = backend.capture(mode=mode)
+    return capture
 
 
 def _open_image_bubble(
@@ -217,6 +257,7 @@ def _open_image_bubble(
 ) -> tuple[Optional[str], CaptureResult]:
     """Inspect one candidate and verify recovery, even after transport errors."""
     image = None
+    same_activity_viewer = False
     try:
         tapped = backend.tap(element=element.index)
         if tapped.ok:
@@ -232,6 +273,11 @@ def _open_image_bubble(
                     if preview.png_b64:
                         image = preview.png_b64
                         break
+                elif (preview.current_activity == chat_activity
+                      and _same_activity_image_preview(preview)):
+                    image = preview.png_b64
+                    same_activity_viewer = True
+                    break
                 elif (preview.current_package != "com.tencent.mm"
                       or (preview.current_activity and preview.current_activity != chat_activity)):
                     break
@@ -239,13 +285,15 @@ def _open_image_bubble(
         logger.warning("WeChat image inspection failed; checking recovery", exc_info=True)
 
     try:
-        restored = backend.capture(mode="image_hierarchy")
+        restored = _wait_for_chat_header(
+            backend, backend.capture(mode="image_hierarchy"), chat, "image_hierarchy")
         if not _verified_chat(restored, chat):
             # Do not send BACK to another app or another conversation. Only
             # reverse the observed in-WeChat transition caused by this tap.
             if (restored.current_package != "com.tencent.mm"
                     or not restored.current_activity
-                    or restored.current_activity == chat_activity):
+                    or (restored.current_activity == chat_activity
+                        and not (same_activity_viewer and not _has_message_input(restored)))):
                 raise ImageRecoveryError("Image inspection left the expected chat")
             backend.keyevent("BACK")
             for _ in range(3):
@@ -414,6 +462,8 @@ def collect_context(
                 visual = backend.capture(
                     mode="image_hierarchy" if open_images else "som"
                 )
+                visual = _wait_for_chat_header(
+                    backend, visual, resolved_chat, "image_hierarchy" if open_images else "som")
             except Exception as exc:
                 return ActionResult(ok=False, action="wechat_collect_context", message=str(exc),
                                     meta={"stop_reason": "capture_failed", "chat_restored": False})
@@ -433,6 +483,7 @@ def collect_context(
                     # tap instead of using pre-recognition element IDs.
                     try:
                         current = backend.capture(mode="image_hierarchy")
+                        current = _wait_for_chat_header(backend, current, resolved_chat, "image_hierarchy")
                     except Exception as exc:
                         return ActionResult(ok=False, action="wechat_collect_context", message=str(exc),
                                             meta={"stop_reason": "capture_failed", "chat_restored": False})
@@ -551,6 +602,7 @@ def collect_context(
         if include_images:
             try:
                 current = backend.capture(mode="hierarchy")
+                current = _wait_for_chat_header(backend, current, resolved_chat, "hierarchy")
             except Exception as exc:
                 return ActionResult(ok=False, action="wechat_collect_context", message=str(exc),
                                     meta={"stop_reason": "capture_failed", "chat_restored": False})
@@ -577,6 +629,8 @@ def collect_context(
     if include_images:
         try:
             current = backend.capture(mode="image_hierarchy" if open_images else "som")
+            current = _wait_for_chat_header(
+                backend, current, resolved_chat, "image_hierarchy" if open_images else "som")
         except Exception as exc:
             return ActionResult(ok=False, action="wechat_collect_context", message=str(exc),
                                 meta={"stop_reason": "capture_failed", "chat_restored": False})

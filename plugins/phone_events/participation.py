@@ -34,6 +34,10 @@ MAX_SENDS_PER_TURN = 3
 COOLDOWN_MARKER = 'COOLDOWN'
 
 _UNREAD_PREFIX = re.compile(r'^\[\d+(?:条)?\]')
+# Muted WeChat groups may replace the original @ token with this system notice.
+_WECHAT_MENTION_NOTICE = re.compile(
+    r'[^\n:]{1,40} mentioned you in a group chat\.?', re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -103,8 +107,15 @@ class ParticipationSettings:
         return next((v for t, v in self.reply_tendencies if t == key), self.reply_tendency)
 
     def is_invited(self, text: str) -> bool:
-        return self.conversation_type == 'private' or any(re.search(r'@' + re.escape(name) + r'(?![\w])', text, re.IGNORECASE)
-                   for name in self.mention_names)
+        if self.conversation_type == 'private':
+            return True
+        # An @ mention is the access signal. The authenticated WeChat notice
+        # is equivalent when the group is muted and the @ token is omitted.
+        return (
+            any(re.search(r'@' + re.escape(name) + r'(?![\w])', text, re.IGNORECASE)
+                for name in self.mention_names)
+            or bool(_WECHAT_MENTION_NOTICE.fullmatch(str(text or '').strip()))
+        )
 
 
 def _tendency_value(value: Any, label: str) -> float:
@@ -453,7 +464,7 @@ def guard_conversation_tool(tool_name: str, args: dict | None = None, **kwargs):
             return None
     return {'action': 'block', 'message': (
         'This turn may reply only to its bound conversation. '
-        'Only private or explicitly invited group turns may read that conversation, view images or research; '
+        'Only private or @-mentioned group turns may read that conversation, view images or research; '
         'ordinary participation must use the observed notification context. If someone asked you to look at '
         'something, reply naturally that they should @ you first, or remain silent.'
     )}

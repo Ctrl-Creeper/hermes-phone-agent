@@ -192,6 +192,84 @@ def test_delayed_preview_is_observed_before_returning():
     assert phone.screen == 'chat'
 
 
+class SameActivityImagePhone(ImageWorkflowPhone):
+    """WeChat's current viewer is an overlay inside LauncherUI."""
+
+    def capture(self, mode):
+        capture = super().capture(mode)
+        if self.screen == 'preview':
+            capture.current_activity = 'ChatUI'
+            # The toolbar may auto-hide before the slower hierarchy capture.
+            if mode == 'screenshot':
+                capture.elements = [UIElement(1, 'host.ocr.Text',
+                    text='Full Image 153K', bounds=(70, 2230, 310, 2270))]
+        return capture
+
+
+def test_same_activity_image_overlay_returns_pixels_and_restores_chat():
+    phone = SameActivityImagePhone()
+    phone.page = 1
+    result = collect_context(phone, 'Example', max_pages=1, max_images=1)
+    assert result.ok
+    assert result.meta['screenshots'] == [phone.encoded]
+    assert result.meta['image_count'] == 1
+    assert result.meta['chat_restored'] is True
+    assert phone.gestures == ['tap', 'BACK']
+
+
+def test_same_activity_other_chat_is_not_backed_out_after_image_preview():
+    class Phone(SameActivityImagePhone):
+        def capture(self, mode):
+            if self.screen == 'preview' and mode == 'image_hierarchy':
+                self.screen = 'chat'
+                self.title = 'Other Group'
+            return super().capture(mode)
+
+    phone = Phone()
+    phone.page = 1
+    result = collect_context(phone, 'Example', max_pages=1, max_images=1)
+    assert not result.ok
+    assert result.meta['chat_restored'] is False
+    assert phone.gestures == ['tap']
+
+
+def test_notification_covering_title_is_waited_out_before_image_tap():
+    class Phone(SameActivityImagePhone):
+        chat_captures = 0
+
+        def capture(self, mode):
+            capture = super().capture(mode)
+            if self.screen == 'chat':
+                self.chat_captures += 1
+                if self.chat_captures == 3:
+                    capture.elements[0].text = 'Other Group · now'
+            return capture
+
+    phone = Phone()
+    phone.page = 1
+    result = collect_context(phone, 'Example', max_pages=1, max_images=1)
+    assert result.ok
+    assert result.meta['image_count'] == 1
+    assert phone.gestures == ['tap', 'BACK']
+
+
+def test_same_activity_unknown_screen_is_not_treated_as_preview():
+    class Phone(SameActivityImagePhone):
+        def capture(self, mode):
+            capture = super().capture(mode)
+            if self.screen == 'preview':
+                # A matching phrase in ordinary content is not a viewer control.
+                capture.elements = [UIElement(1, 'host.ocr.Text',
+                    text='Full Image 153K', bounds=(70, 500, 310, 540))]
+            return capture
+
+    phone = Phone()
+    phone.page = 1
+    result = collect_context(phone, 'Example', max_pages=1, max_images=1)
+    assert not result.ok
+    assert phone.gestures == ['tap']
+
+
 def test_native_and_vision_regions_for_one_photo_do_not_consume_two_attempts():
     phone = ImageWorkflowPhone(fault='overlap')
     phone.page = 1

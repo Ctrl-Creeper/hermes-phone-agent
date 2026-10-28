@@ -102,6 +102,48 @@ def test_search_waits_for_result_instead_of_tapping_keyboard_suggestion():
     assert taps == [9, 2]
 
 
+def test_search_prefers_group_chat_over_search_results_with_same_title():
+    def cap(elements, activity='.plugin.fts.ui.FTSMainUI'):
+        return CaptureResult(mode='hierarchy', width=1080, height=2400,
+                             current_package='com.tencent.mm',
+                             current_activity=activity, elements=elements)
+
+    search_page = cap([text(1, 'Search local or internet results', (184, 135, 823, 178))])
+    result_page = cap([
+        text(1, 'Group Chats', (41, 291, 255, 333)),
+        text(2, '图• 老查留学吴宸丞2028Fall美本申..（9）', (44, 402, 918, 483)),
+        text(3, '六 Search Results', (48, 589, 384, 632)),
+        text(4, 'Q 老查留学吴宸丞2028Fall美本申请规划〉', (45, 697, 1035, 754)),
+    ])
+    chat_page = cap([
+        text(1, '老查留学吴宸本申请规划（9）', (202, 107, 816, 164)),
+        UIElement(index=2, class_name=wechat._MESSAGE_INPUT_CLASS,
+                  bounds=(110, 2165, 720, 2325)),
+    ], activity='.ui.LauncherUI')
+    captures = iter([search_page, result_page, chat_page])
+    taps = []
+
+    class Backend:
+        def tap(self, **kwargs):
+            taps.append(kwargs['element'])
+            return ActionResult(ok=True, action='tap')
+
+        def set_text(self, value):
+            return ActionResult(ok=True, action='set_text')
+
+        def capture(self, mode):
+            return next(captures)
+
+    result = wechat._search_for_chat(
+        Backend(),
+        cap([UIElement(index=9, class_name=wechat._SEARCH_CONTROL_CLASS,
+                       bounds=(831, 84, 972, 204))], activity='.ui.LauncherUI'),
+        '老查留学吴宸丞2028Fall美本申请规划',
+    )
+    assert result.ok, result.message
+    assert taps == [9, 2]
+
+
 def test_recovery_accepts_list_reached_by_its_last_move():
     # Cold starts can spend every move waiting for WeChat to draw; the
     # screen produced by the final move must still be checked.
@@ -139,6 +181,35 @@ def test_search_activity_is_never_an_open_chat(activity):
     )
     assert wechat._find_chat_header(capture, 'Example Group') is not None
     assert not wechat._chat_is_open(capture, 'Example Group')
+
+
+def test_long_chat_header_allows_ocr_missing_middle_fragment():
+    # Host OCR can drop a middle run from a long WeChat title while retaining
+    # the distinctive prefix and suffix. The composer proves this is a chat,
+    # but the old global 0.80 ratio rejected the opened destination.
+    capture = CaptureResult(
+        mode='hierarchy', width=1080, height=2400,
+        current_package='com.tencent.mm', current_activity='.ui.LauncherUI',
+        elements=[
+            text(1, '老查留学吴宸本申请规划（9）', (202, 107, 816, 164)),
+            UIElement(index=2, class_name=wechat._MESSAGE_INPUT_CLASS,
+                      bounds=(110, 2165, 720, 2325)),
+        ],
+    )
+    assert wechat._chat_is_open(capture, '老查留学吴宸丞2028Fall美本申请规划')
+
+
+def test_long_chat_header_ignores_navigation_chrome_in_ocr_label():
+    capture = CaptureResult(
+        mode='hierarchy', width=1080, height=2400,
+        current_package='com.tencent.mm', current_activity='.ui.LauncherUI',
+        elements=[
+            text(1, '< 31老查留学吴宸丞2. 美本申请规划（9）込', (41, 100, 927, 161)),
+            UIElement(index=2, class_name=wechat._MESSAGE_INPUT_CLASS,
+                      bounds=(110, 2165, 720, 2325)),
+        ],
+    )
+    assert wechat._chat_is_open(capture, '老查留学吴宸丞2028Fall美本申请规划')
 
 
 def test_open_chat_retaps_row_when_cold_start_drops_first_tap():

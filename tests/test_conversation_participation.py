@@ -437,6 +437,16 @@ def test_private_settings_default_to_short_batching_without_group_cooldown():
     assert config.min_interval_seconds == 0
 
 
+def test_group_mention_is_the_image_and_history_access_signal():
+    config = ParticipationSettings.from_config(
+        {'enabled': True, 'mention_names': ['Void_DRSAI']},
+    )
+    assert config.is_invited('@Void_DRSAI 看一下刚才的图片')
+    # Muted groups replace the visible @ token with this Android notice.
+    assert config.is_invited('Alice mentioned you in a group chat.')
+    assert not config.is_invited('Alice: 看一下刚才的图片')
+
+
 def test_private_bursts_use_the_shared_scheduler_and_next_turn_has_no_long_cooldown():
     async def scenario():
         config = ParticipationSettings.from_config({

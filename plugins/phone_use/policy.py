@@ -37,6 +37,7 @@ ALL_PHONE_ACTIONS = frozenset({
     "wechat_send_attachment",
     "wechat_search_history",
     "wechat_favorite",
+    "wechat_accept_friend",
     "tap", "double_tap", "long_press", "swipe",
     "type", "clear_text", "set_text", "keyevent",
     "launch_app", "stop_app", "install_apk", "shell",
@@ -293,9 +294,11 @@ def _parse_config(raw: Dict[str, Any]) -> PhonePolicy:
         logger.warning("invalid default_behavior %r, using 'report'", default)
         default = BEHAVIOR_REPORT
 
-    global_restrict = frozenset(
-        a for a in raw.get("global_restrict", []) if a in ALL_PHONE_ACTIONS
-    )
+    requested = raw.get("global_restrict") or []
+    for unknown in sorted({a for a in requested if a not in ALL_PHONE_ACTIONS}, key=repr):
+        # A typo here would otherwise silently leave an action unrestricted.
+        logger.warning("global_restrict: ignoring unknown action %r", unknown)
+    global_restrict = frozenset(a for a in requested if a in ALL_PHONE_ACTIONS)
 
     # Parse app_profiles
     profiles: List[AppProfile] = []

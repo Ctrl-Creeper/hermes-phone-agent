@@ -4805,3 +4805,12 @@ def test_wechat_split_reply_reuses_open_chat_only_when_verified(monkeypatch):
     opened.clear()
     wechat_module._reply_once(Backend(), "别的群", "x", reuse_open_chat=True)
     assert opened == ["别的群"] and wechat_module._open_reply_chat is None
+
+
+def test_global_restrict_covers_every_wechat_write_action_and_warns_on_unknown(caplog):
+    policy = _parse_config({"global_restrict": [
+        "wechat_accept_friend", "wechat_send_attachment", "wechat_favorite", "wechat_typo",
+    ]})
+    assert {"wechat_accept_friend", "wechat_send_attachment", "wechat_favorite"} <= policy.global_restrict
+    assert "wechat_typo" not in policy.global_restrict
+    assert "wechat_typo" in caplog.text

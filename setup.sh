@@ -111,7 +111,7 @@ echo "5. Socket service will start on the first Hermes session."
 if [[ "$(uname -s)" == "Darwin" ]] && command -v swiftc &>/dev/null; then
     echo "6. Installing macOS host OCR helper..."
     mkdir -p "${HOME}/.hermes/bin"
-    swiftc "${SCRIPT_DIR}/plugins/phone_use/native/phone_ocr.swift" \
+    swiftc -O "${SCRIPT_DIR}/plugins/phone_use/native/phone_ocr.swift" \
         -o "${HOME}/.hermes/bin/phone-ocr" \
         -framework Vision -framework ImageIO -framework CoreGraphics
     chmod 700 "${HOME}/.hermes/bin/phone-ocr"

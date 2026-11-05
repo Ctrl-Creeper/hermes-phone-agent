@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import tempfile
 import time
@@ -37,7 +38,7 @@ from .backend import (
     PhoneBackend,
     UIElement,
 )
-from .host_ocr import add_semantic_regions, recognize_text
+from .host_ocr import add_semantic_regions, recognize_rgba, recognize_text
 from .sanitize import (
     validate_activity_name,
     validate_apk_path,
@@ -286,23 +287,29 @@ class AdbBackend(PhoneBackend):
                 elements = self._dump_ui_hierarchy()
             hierarchy_usable = _hierarchy_is_usable(elements)
             if not hierarchy_usable or mode == "image_hierarchy":
-                ocr_png_b64 = png_b64 or self._take_screenshot()
-                if ocr_png_b64:
-                    ocr_elements = recognize_text(ocr_png_b64)
-                    if ocr_elements:
-                        if hierarchy_usable:
-                            for element in ocr_elements:
-                                if element.class_name != "host.vision.ImageCandidate":
-                                    continue
-                                element.index = len(elements) + 1
-                                elements.append(element)
-                        else:
-                            elements = ocr_elements
-                            used_host_ocr = True
-                        logger.info(
-                            "Host vision produced %d element(s)",
-                            len(ocr_elements),
-                        )
+                started = time.monotonic()
+                ocr_elements: List[UIElement] = []
+                if mode == "hierarchy" and png_b64 is None:
+                    # Nobody keeps the PNG of a text-only observation.
+                    ocr_elements = self._recognize_raw_screen() or []
+                if not ocr_elements:
+                    ocr_png_b64 = png_b64 or self._take_screenshot()
+                    if ocr_png_b64:
+                        ocr_elements = recognize_text(ocr_png_b64)
+                if ocr_elements:
+                    if hierarchy_usable:
+                        for element in ocr_elements:
+                            if element.class_name != "host.vision.ImageCandidate":
+                                continue
+                            element.index = len(elements) + 1
+                            elements.append(element)
+                    else:
+                        elements = ocr_elements
+                        used_host_ocr = True
+                    logger.info(
+                        "Host vision produced %d element(s) in %.0f ms",
+                        len(ocr_elements), (time.monotonic() - started) * 1000,
+                    )
         if used_host_ocr:
             elements = add_semantic_regions(
                 elements,
@@ -320,6 +327,29 @@ class AdbBackend(PhoneBackend):
             current_activity=fg.get("activity", ""),
             png_bytes_len=len(base64.b64decode(png_b64)) if png_b64 else 0,
         )
+
+    def _recognize_raw_screen(self) -> Optional[List[UIElement]]:
+        """OCR a raw ``screencap`` frame: no on-device PNG encode, pull or base64.
+
+        None means the caller should take the PNG route (unusual frame format,
+        adb failure, or a helper without ``--serve``).
+        """
+        try:
+            result = subprocess.run(
+                self._adb_cmd("exec-out", "screencap"), capture_output=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.debug("raw screencap failed: %s", exc)
+            return None
+        frame = result.stdout
+        if result.returncode != 0 or len(frame) < 16:
+            return None
+        width, height, pixel_format = struct.unpack("<III", frame[:12])
+        # The header is 12 bytes before Android 13 and 16 after; format 1 is RGBA_8888.
+        offset = len(frame) - width * height * 4
+        if pixel_format != 1 or offset not in (12, 16):
+            return None
+        return recognize_rgba(memoryview(frame)[offset:], width, height)
 
     def _take_screenshot(self) -> Optional[str]:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:

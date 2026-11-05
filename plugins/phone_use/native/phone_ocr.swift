@@ -45,27 +45,35 @@ func pixelBounds(_ box: CGRect, width: Int, height: Int) -> [Int] {
 }
 
 func detectVisualRegions(_ image: CGImage, width: Int, height: Int) -> [VisualRegion] {
-    let bytesPerPixel = 4
-    let bytesPerRow = width * bytesPerPixel
-    var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
     guard let context = CGContext(
-        data: &pixels,
+        data: nil,
         width: width,
         height: height,
         bitsPerComponent: 8,
-        bytesPerRow: bytesPerRow,
+        bytesPerRow: width * 4,
         space: CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-    ) else {
+    ), let base = context.data else {
         return []
     }
     context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    let pixels = base.assumingMemoryBound(to: UInt8.self)
+    let bytesPerPixel = 4
+    let bytesPerRow = context.bytesPerRow
+
+    @inline(__always) func luma(_ offset: Int) -> Double {
+        Double(pixels[offset]) * 0.299
+            + Double(pixels[offset + 1]) * 0.587
+            + Double(pixels[offset + 2]) * 0.114
+    }
 
     let tile = 16
     let columns = (width + tile - 1) / tile
     let rows = (height + tile - 1) / tile
     var mask = [Bool](repeating: false, count: rows * columns)
 
+    // Scalar accumulators: this runs over every screenshot, so keep the inner
+    // loop free of heap allocation.
     for tileY in 0..<rows {
         for tileX in 0..<columns {
             let left = tileX * tile
@@ -73,51 +81,39 @@ func detectVisualRegions(_ image: CGImage, width: Int, height: Int) -> [VisualRe
             let right = min(width, left + tile)
             let bottom = min(height, top + tile)
             var count = 0.0
-            var channelSums = [0.0, 0.0, 0.0]
-            var channelSquares = [0.0, 0.0, 0.0]
+            var sumR = 0.0, sumG = 0.0, sumB = 0.0
+            var squareR = 0.0, squareG = 0.0, squareB = 0.0
             var saturation = 0.0
             var gradient = 0.0
             var gradientCount = 0.0
 
-            stride(from: top, to: bottom, by: 2).forEach { y in
-                stride(from: left, to: right, by: 2).forEach { x in
+            for y in stride(from: top, to: bottom, by: 2) {
+                for x in stride(from: left, to: right, by: 2) {
                     let offset = y * bytesPerRow + x * bytesPerPixel
                     let red = Double(pixels[offset])
                     let green = Double(pixels[offset + 1])
                     let blue = Double(pixels[offset + 2])
-                    let luma = red * 0.299 + green * 0.587 + blue * 0.114
-                    let channels = [red, green, blue]
-                    for channel in 0..<3 {
-                        channelSums[channel] += channels[channel]
-                        channelSquares[channel] += channels[channel] * channels[channel]
-                    }
+                    let current = red * 0.299 + green * 0.587 + blue * 0.114
+                    sumR += red; sumG += green; sumB += blue
+                    squareR += red * red; squareG += green * green; squareB += blue * blue
                     saturation += max(red, green, blue) - min(red, green, blue)
                     count += 1
                     if x >= left + 2 {
-                        let previous = offset - 2 * bytesPerPixel
-                        let previousLuma = Double(pixels[previous]) * 0.299
-                            + Double(pixels[previous + 1]) * 0.587
-                            + Double(pixels[previous + 2]) * 0.114
-                        gradient += abs(luma - previousLuma)
+                        gradient += abs(current - luma(offset - 2 * bytesPerPixel))
                         gradientCount += 1
                     }
                     if y >= top + 2 {
-                        let previous = offset - 2 * bytesPerRow
-                        let previousLuma = Double(pixels[previous]) * 0.299
-                            + Double(pixels[previous + 1]) * 0.587
-                            + Double(pixels[previous + 2]) * 0.114
-                        gradient += abs(luma - previousLuma)
+                        gradient += abs(current - luma(offset - 2 * bytesPerRow))
                         gradientCount += 1
                     }
                 }
             }
             guard count > 0 else { continue }
-            let deviation = (0..<3).reduce(0.0) { value, channel in
-                let mean = channelSums[channel] / count
-                return value + sqrt(max(
-                    0, channelSquares[channel] / count - mean * mean
-                ))
-            } / 3.0
+            let deviation = (
+                sqrt(max(0, squareR / count - (sumR / count) * (sumR / count)))
+                + sqrt(max(0, squareG / count - (sumG / count) * (sumG / count)))
+                + sqrt(max(0, squareB / count - (sumB / count) * (sumB / count)))
+            ) / 3.0
             let meanSaturation = saturation / count
             let meanGradient = gradientCount > 0 ? gradient / gradientCount : 0
             mask[tileY * columns + tileX] = (
@@ -214,22 +210,9 @@ func detectVisualRegions(_ image: CGImage, width: Int, height: Int) -> [VisualRe
     return merged
 }
 
-do {
-    guard CommandLine.arguments.count == 2 else {
-        throw OCRError.missingImagePath
-    }
-
-    let imageURL = URL(fileURLWithPath: CommandLine.arguments[1])
-    guard
-        let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil),
-        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
-            as? [CFString: Any],
-        let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
-        let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
-        let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
-    else {
-        throw OCRError.unreadableImage
-    }
+func recognize(_ image: CGImage) throws -> OCRPayload {
+    let width = image.width
+    let height = image.height
 
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
@@ -237,8 +220,7 @@ do {
     request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
     request.minimumTextHeight = 0.008
 
-    let handler = VNImageRequestHandler(url: imageURL, options: [:])
-    try handler.perform([request])
+    try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
 
     let observations = request.results ?? []
     let items = observations.compactMap { observation -> OCRItem? in
@@ -264,16 +246,128 @@ do {
     let visualRegions = detectVisualRegions(image, width: width, height: height)
     let barcodeRequest = VNDetectBarcodesRequest()
     barcodeRequest.symbologies = [.qr]
-    try handler.perform([barcodeRequest])
+    try VNImageRequestHandler(cgImage: image, options: [:]).perform([barcodeRequest])
     let qrCodes = Array(Set((barcodeRequest.results ?? []).compactMap {
         $0.payloadStringValue
     })).sorted()
-    let data = try JSONEncoder().encode(OCRPayload(
+    return OCRPayload(
         width: width, height: height, items: items, visualRegions: visualRegions,
         qrCodes: qrCodes
-    ))
+    )
+}
+
+func decodeImage(format: String, data: Data, width: Int, height: Int) -> CGImage? {
+    switch format {
+    case "png":
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return nil
+        }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    case "rgba":
+        // Android `screencap` without -p: tightly packed RGBA, alpha ignored.
+        guard width > 0, height > 0, data.count >= width * height * 4,
+              let provider = CGDataProvider(data: data as CFData) else {
+            return nil
+        }
+        return CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+    default:
+        return nil
+    }
+}
+
+func readLineData() -> Data? {
+    var line = Data()
+    while true {
+        let byte = FileHandle.standardInput.readData(ofLength: 1)
+        if byte.isEmpty { return line.isEmpty ? nil : line }
+        if byte[0] == 0x0A { return line }
+        line.append(byte)
+    }
+}
+
+func readExactly(_ count: Int) -> Data? {
+    var data = Data()
+    while data.count < count {
+        let chunk = FileHandle.standardInput.readData(ofLength: count - data.count)
+        if chunk.isEmpty { return nil }
+        data.append(chunk)
+    }
+    return data
+}
+
+func emit(_ data: Data) {
     FileHandle.standardOutput.write(data)
     FileHandle.standardOutput.write(Data([0x0A]))
+}
+
+func emitError(_ message: String) {
+    let body = try? JSONSerialization.data(withJSONObject: ["error": message])
+    emit(body ?? Data("{\"error\":\"unknown\"}".utf8))
+}
+
+/// Long-lived mode: one JSON header line per request, then `length` image
+/// bytes on stdin; one JSON line back. Keeping the process (and Vision's
+/// loaded models) alive avoids a cold start for every screenshot.
+func serve() {
+    while let line = readLineData() {
+        autoreleasepool {
+            guard
+                let header = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                let format = header["format"] as? String,
+                let length = header["length"] as? Int, length >= 0,
+                let data = readExactly(length)
+            else {
+                emitError("bad request")
+                return
+            }
+            guard let image = decodeImage(
+                format: format,
+                data: data,
+                width: header["width"] as? Int ?? 0,
+                height: header["height"] as? Int ?? 0
+            ) else {
+                emitError("unreadable image")
+                return
+            }
+            do {
+                emit(try JSONEncoder().encode(recognize(image)))
+            } catch {
+                emitError("\(error)")
+            }
+        }
+    }
+}
+
+if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--serve" {
+    serve()
+    exit(0)
+}
+
+do {
+    guard CommandLine.arguments.count == 2 else {
+        throw OCRError.missingImagePath
+    }
+
+    let imageURL = URL(fileURLWithPath: CommandLine.arguments[1])
+    guard
+        let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil),
+        let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+    else {
+        throw OCRError.unreadableImage
+    }
+    emit(try JSONEncoder().encode(recognize(image)))
 } catch {
     FileHandle.standardError.write(Data("\(error)\n".utf8))
     exit(1)

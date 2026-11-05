@@ -191,6 +191,10 @@ are preserved through clipboard input; reply bodies are not rewritten.
 The host OCR fallback currently requires macOS with `swiftc`; `setup.sh`
 builds and installs it automatically. Other platforms continue using Android's
 accessibility hierarchy and screenshots.
+The helper is built with `-O` and runs as a resident `--serve` process that exits
+after a minute idle; text-only captures read a raw `screencap` frame, which takes
+about 0.4 s instead of 1.2 s. Re-run `setup.sh` to rebuild an older helper; one
+without `--serve` keeps working through the one-shot path.
 
 Experimental [notification-only WeChat participation](CONVERSATION_PARTICIPATION.md)
 buffers received WeChat private and group notifications per conversation, then lets one

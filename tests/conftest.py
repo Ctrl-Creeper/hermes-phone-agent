@@ -22,3 +22,16 @@ def _no_background_preopen(monkeypatch):
     from plugins.phone_use import tool
 
     monkeypatch.setattr(tool, "preopen_wechat_chat", lambda chat, decision: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_ocr_helper(monkeypatch, tmp_path):
+    # Never start the developer's installed ~/.hermes/bin/phone-ocr, and give
+    # each test a fresh resident-helper client so none inherits another's state.
+    from plugins.phone_use import host_ocr
+
+    server = host_ocr._OcrServer()
+    monkeypatch.setattr(host_ocr, "_DEFAULT_HELPER_PATH", tmp_path / "no-phone-ocr")
+    monkeypatch.setattr(host_ocr, "_server", server)
+    yield
+    server.close()

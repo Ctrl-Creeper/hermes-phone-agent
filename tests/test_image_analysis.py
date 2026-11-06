@@ -318,6 +318,9 @@ def test_app_switch_during_local_recognition_stops_before_history_swipe(vision_f
         return result
 
     monkeypatch.setattr(host_ocr, '_DEFAULT_HELPER_PATH', helper)
+    # The switch is injected through the one-shot transport, so keep the
+    # resident --serve helper out of this test.
+    monkeypatch.setattr(host_ocr._server, 'request', lambda *a, **kw: None)
     monkeypatch.setattr(subprocess, 'run', recognize_then_switch)
     result = collect_context(phone, 'Example', max_pages=2, max_images=1)
     assert not result.ok

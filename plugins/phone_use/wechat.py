@@ -10,6 +10,7 @@ from difflib import SequenceMatcher
 from typing import Callable, Optional
 
 from .backend import ActionResult, CaptureResult, PhoneBackend, UIElement
+from .host_ocr import recognize_text
 
 logger = logging.getLogger(__name__)
 
@@ -1035,6 +1036,73 @@ def _wait_until_wechat_drawn(backend: PhoneBackend, capture: CaptureResult,
     return capture
 
 
+# Android's heads-up banner: "<chat> • now" on its first line, near the top.
+_BANNER_SUFFIX = re.compile(r"\s*[•·・]\s*(?:now|\d+\s*m(?:in)?|刚刚|\d+\s*分钟前)?\s*$", re.IGNORECASE)
+
+
+def _notification_banner(capture: CaptureResult, chat: str) -> Optional[UIElement]:
+    """The heads-up banner's title line for *chat*, if one is on screen.
+
+    Only over another app: WeChat in front shows its own in-app banner.
+    """
+    if not capture.elements or capture.current_package == WECHAT_PACKAGE:
+        return None
+    top, bottom = int(capture.height * 0.04), int(capture.height * 0.11)
+    titles = []
+    for element in capture.elements:
+        label = _label(element)
+        if not (top <= element.bounds[1] < bottom and _BANNER_SUFFIX.search(label)):
+            continue
+        title = _BANNER_SUFFIX.sub("", label).strip()
+        if title and not title.endswith(("…", "...")):  # never match a truncated name
+            titles.append(UIElement(index=element.index, class_name=element.class_name,
+                                    text=title, bounds=element.bounds, clickable=True))
+    return _find_text(titles, chat)
+
+
+def _open_from_notification_banner(backend: PhoneBackend, chat: str) -> Optional[CaptureResult]:
+    """Tap the target's heads-up banner; WeChat then opens that chat itself.
+
+    Returns the open chat, or None to fall back to navigating (no banner,
+    an unreadable screen, or a tap that did not open the verified chat).
+    """
+    try:
+        screen = backend.capture(mode="screenshot")
+        if not screen.png_b64 or screen.current_package == WECHAT_PACKAGE:
+            return None
+        screen.elements = recognize_text(screen.png_b64)
+    except Exception as exc:
+        logger.warning("WeChat banner check failed: %s", exc)
+        return None
+    banner = _notification_banner(screen, chat)
+    if banner is None:
+        return None
+    x, y = banner.center()
+    tapped = _run_and_capture(backend, "tap", lambda: backend.tap(x=x, y=y))
+    if tapped.capture is None:
+        return None
+    opened = _settle_capture(backend, tapped.capture, lambda value: _chat_is_open(value, chat),
+                             attempts=0, until=time.monotonic() + _LIST_TAP_REACTION_SECONDS)
+    if _chat_is_open(opened, chat):
+        logger.info("WeChat opened %r from its notification banner", chat)
+        return opened
+    logger.info("WeChat banner tap did not open %r; navigating instead", chat)
+    return None
+
+
+def _is_other_chat(capture: CaptureResult, chat: str) -> bool:
+    """A conversation page, but not *chat*'s: Back from it lands on the list."""
+    return (
+        capture.current_package in ("", WECHAT_PACKAGE)
+        and _find_input(capture.elements) is not None
+        and _has_title_bar(capture)
+        and _find_chat_header(capture, chat) is None
+        and _find_conversation_tab(capture) is None
+        and not _is_search_page(capture)
+        and "fts" not in capture.current_activity.rsplit(".", 1)[-1].casefold()
+    )
+
+
 def open_visible_chat(backend: PhoneBackend, chat: str) -> ActionResult:
     """Open *chat* only when it is already open or a row on the chat list.
 
@@ -1053,6 +1121,10 @@ def open_visible_chat(backend: PhoneBackend, chat: str) -> ActionResult:
 
     if not chat or _EMOJI_PLACEHOLDER.search(chat):
         return failed("chat is not a plain visible title")
+    # Like a person would: tap the notification and WeChat jumps to the chat.
+    from_banner = _open_from_notification_banner(backend, chat)
+    if from_banner is not None:
+        return opened(from_banner)
     launch = _run_and_capture(backend, "launch_app", lambda: backend.launch_app(WECHAT_PACKAGE))
     capture = launch.capture
     if not launch.ok or capture is None:
@@ -1061,6 +1133,19 @@ def open_visible_chat(backend: PhoneBackend, chat: str) -> ActionResult:
     capture = _wait_until_wechat_drawn(backend, capture, chat)
     if _chat_is_open(capture, chat):
         return opened(capture)
+    if not _is_conversation_list(capture):
+        # WeChat resumes where it was left, usually the chat of the previous
+        # reply. Leave a verified chat with Back; a second Back only if the
+        # first merely closed the keyboard. Anything else ends the attempt.
+        for _ in range(2):
+            if not _is_other_chat(capture, chat):
+                break
+            back = _run_and_capture(backend, "keyevent", lambda: backend.keyevent("BACK"))
+            if back.capture is None:
+                return failed(back.message or "Back failed")
+            capture = _wait_until_wechat_drawn(backend, back.capture, chat)
+            if _is_conversation_list(capture):
+                break
     if not _is_conversation_list(capture):
         return failed("WeChat is not on the chat list", capture)
     target = _find_text(_conversation_rows(capture), chat)

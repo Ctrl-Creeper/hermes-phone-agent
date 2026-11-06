@@ -434,6 +434,9 @@ def test_chat_header_is_the_title_bar_not_the_first_message_sender():
     assert wechat._find_chat_header(chat_page, 'Other Group') is not None
 
 
+_LAUNCHER_NO_BANNER = CaptureResult(mode='screenshot', width=1080, height=2400,
+                                   current_package='com.google.android.apps.nexuslauncher')
+
 @pytest.fixture
 def emulator_clock(monkeypatch):
     """Real wait limits on a virtual clock; each capture costs 0.6 s as measured live."""
@@ -450,6 +453,8 @@ def emulator_clock(monkeypatch):
 
         def capture(mode='hierarchy'):
             clock["now"] += 0.6
+            if mode == 'screenshot':  # the banner check: a launcher with no notification
+                return _LAUNCHER_NO_BANNER
             return next(frames)
         return capture
     return timed
@@ -468,6 +473,8 @@ def _visible_chat_backend(screens):
             return ActionResult(ok=True, action='launch_app')
 
         def capture(self, mode='hierarchy'):
+            if mode == 'screenshot':  # the banner check: a launcher with no notification
+                return _LAUNCHER_NO_BANNER
             capture = screens[min(self.screen, len(screens) - 1)]
             return capture
 
@@ -557,7 +564,6 @@ def test_visible_chat_repeats_a_dropped_list_tap_once():
 
 
 @pytest.mark.parametrize("screens", [
-    [_VISIBLE_OTHER],                     # another chat is open
     [_page(text(1, 'Settings', (420, 104, 660, 157)))],  # some unrelated page
     [_VISIBLE_LIST.__class__(**{**_VISIBLE_LIST.__dict__, 'elements': _VISIBLE_LIST.elements[:1] + _VISIBLE_LIST.elements[2:]})],  # row not visible
     [_VISIBLE_LIST, _VISIBLE_LIST],                    # WeChat ignored the row tap
@@ -615,3 +621,104 @@ def test_launcher_frame_reported_as_wechat_is_not_a_drawn_wechat_ui():
 
     assert not any(e.class_name == 'host.ocr.MessageInput' for e in enriched)
     assert not wechat._wechat_ui_drawn(frame, 'Example Group')
+
+
+def test_visible_chat_leaves_the_previous_chat_with_one_back(emulator_clock):
+    # WeChat resumes on the chat of the previous reply; Back reaches the list.
+    backend, inputs = _visible_chat_backend([_VISIBLE_OTHER])
+    frames = [_VISIBLE_OTHER, _VISIBLE_LIST, _VISIBLE_CHAT, _VISIBLE_CHAT]
+    backend.capture = emulator_clock(frames)
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert result.ok
+    assert inputs == ["launch", ("key", "BACK"), ("tap", 2)]
+
+
+def test_visible_chat_never_presses_back_past_the_chat_list(emulator_clock):
+    # Back that only closes the keyboard gets one more; Back on the list
+    # itself would leave WeChat, so it never happens.
+    backend, inputs = _visible_chat_backend([_VISIBLE_OTHER])
+    frames = [_VISIBLE_OTHER, _VISIBLE_OTHER, _VISIBLE_LIST, _VISIBLE_CHAT, _VISIBLE_CHAT]
+    backend.capture = emulator_clock(frames)
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert result.ok
+    assert inputs == ["launch", ("key", "BACK"), ("key", "BACK"), ("tap", 2)]
+
+
+def test_visible_chat_gives_up_on_a_chat_that_back_does_not_leave(emulator_clock):
+    backend, inputs = _visible_chat_backend([_VISIBLE_OTHER])
+    backend.capture = emulator_clock([_VISIBLE_OTHER] * 6)
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert not result.ok
+    assert inputs == ["launch", ("key", "BACK"), ("key", "BACK")]  # bounded; no taps, no search
+
+
+def _banner_screen(title_line):
+    """Recorded launcher frame with WeChat's heads-up banner (OCR boxes as captured live)."""
+    capture = CaptureResult(mode='screenshot', width=1080, height=2400, png_b64='cG5n',
+                            current_package='com.google.android.apps.nexuslauncher')
+    return capture, [text(1, '3:32', (41, 17, 115, 49)), text(2, title_line, (229, 139, 579, 175)),
+                     text(3, '［7］闫：连着上了好几天了', (226, 184, 624, 231)), text(4, 'Play Store', (73, 1757, 244, 1801))]
+
+
+def _banner_backend(monkeypatch, emulator_clock, title_line, after_tap):
+    screen, ocr = _banner_screen(title_line)
+    monkeypatch.setattr(wechat, 'recognize_text', lambda png: ocr)
+    backend, inputs = _visible_chat_backend([_VISIBLE_LIST])
+    frames = iter(after_tap)
+    timed = emulator_clock(after_tap)
+
+    def capture(mode='hierarchy'):
+        return screen if mode == 'screenshot' else timed(mode)
+    backend.capture = capture
+    return backend, inputs
+
+
+def test_tapping_the_notification_banner_jumps_straight_into_the_chat(monkeypatch, emulator_clock):
+    backend, inputs = _banner_backend(monkeypatch, emulator_clock, 'Example Group•now',
+                                      [_VISIBLE_CHAT, _VISIBLE_CHAT])
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert result.ok
+    assert inputs == [("tap", None)]  # the banner itself: no launch, no list, no Back
+
+
+@pytest.mark.parametrize("title_line", [
+    'Someone Else•now',       # another chat's notification
+    'Example Gro…•now',       # truncated name: never guess
+    'Example Group',          # no "• now": not a notification title line
+])
+def test_banner_is_only_tapped_when_it_is_the_target_chats(monkeypatch, emulator_clock, title_line):
+    backend, inputs = _banner_backend(monkeypatch, emulator_clock, title_line,
+                                      [_VISIBLE_LIST, _VISIBLE_CHAT, _VISIBLE_CHAT])
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert result.ok
+    assert inputs == ["launch", ("tap", 2)]  # normal list path; the banner was left alone
+
+
+def test_banner_that_opens_another_chat_falls_back_to_navigation(monkeypatch, emulator_clock):
+    # A newer notification replaced the banner between screenshot and tap, so
+    # the tap opened another chat. It stays there until Back.
+    screen, ocr = _banner_screen('Example Group•now')
+    monkeypatch.setattr(wechat, 'recognize_text', lambda png: ocr)
+    backend, inputs = _visible_chat_backend([_VISIBLE_LIST])
+    state = {"page": "other"}
+    pages = {"other": _VISIBLE_OTHER, "list": _VISIBLE_LIST, "chat": _VISIBLE_CHAT}
+    timed = emulator_clock(iter(lambda: pages[state["page"]], None))
+    backend.capture = lambda mode='hierarchy': screen if mode == 'screenshot' else timed(mode)
+    real_key, real_tap = backend.keyevent, backend.tap
+    backend.keyevent = lambda key: (state.update(page="list") if key == "BACK" else None, real_key(key))[1]
+    backend.tap = lambda **kw: (state.update(page="chat") if kw.get("element") == 2 else None, real_tap(**kw))[1]
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert result.ok
+    assert inputs == [("tap", None), "launch", ("key", "BACK"), ("tap", 2)]

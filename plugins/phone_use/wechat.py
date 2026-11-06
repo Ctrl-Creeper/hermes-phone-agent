@@ -1069,7 +1069,9 @@ def open_visible_chat(backend: PhoneBackend, chat: str) -> ActionResult:
     tapped = _run_and_capture(backend, "tap", lambda: backend.tap(element=target.index))
     if tapped.capture is None:
         return failed(tapped.message or "chat-list tap failed")
-    done = lambda value: _chat_is_open(value, chat)  # noqa: E731
+    def done(value: CaptureResult) -> bool:
+        return _chat_is_open(value, chat)
+
     settled = _settle_capture(backend, tapped.capture, done)  # the chat may still be sliding in
     # WeChat often ignores the first list tap after a resume; repeat it once,
     # only while the same list is still on screen.

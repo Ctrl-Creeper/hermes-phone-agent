@@ -257,7 +257,7 @@ def test_full_navigation_failure_returns_home(phone, monkeypatch):
 
     _preopen_and_wait().finish()
 
-    assert phone.full == [CHAT]
+    assert phone.full == [CHAT] * tool._PREOPEN_FULL_ATTEMPTS
     assert wechat._open_reply_chat is None and phone.backend.keys == ["HOME"]
 
 
@@ -267,7 +267,8 @@ def test_no_full_navigation_once_the_turn_has_ended(phone, monkeypatch):
     started = threading.Event()
 
     def slow_fail(b, chat):
-        started.set(); release.wait(5)
+        started.set()
+        release.wait(5)
         return ActionResult(ok=False, action="wechat_open_chat", message="not on the list")
 
     monkeypatch.setattr(tool, "open_visible_wechat_chat", slow_fail)
@@ -277,7 +278,32 @@ def test_no_full_navigation_once_the_turn_has_ended(phone, monkeypatch):
     finisher.start()
     while not preopen._finished:
         threading.Event().wait(0.01)
-    release.set(); preopen._thread.join(5); finisher.join(5)
+    release.set()
+    preopen._thread.join(5)
+    finisher.join(5)
 
     assert phone.full == []
+    assert phone.backend.keys == ["HOME"]
+
+
+def test_preopen_retries_full_navigation_once_like_the_reply(phone, monkeypatch):
+    _fast_path_fails(monkeypatch)
+    outcomes = iter([False, True])  # first full attempt fails, the retry succeeds
+    monkeypatch.setattr(tool, "open_wechat_chat", lambda b, chat: (
+        phone.full.append(chat), ActionResult(ok=next(outcomes), action="wechat_open_chat"))[1])
+
+    preopen = _preopen_and_wait()
+    reused = wechat._reusable_open_chat(phone.backend, CHAT)
+    preopen.finish()
+
+    assert phone.full == [CHAT, CHAT]
+    assert reused is not None and reused.ok and phone.backend.keys == []
+
+
+def test_preopen_full_navigation_is_bounded(phone, monkeypatch):
+    _fast_path_fails(monkeypatch)  # and every full attempt fails
+
+    _preopen_and_wait().finish()
+
+    assert phone.full == [CHAT] * tool._PREOPEN_FULL_ATTEMPTS
     assert phone.backend.keys == ["HOME"]

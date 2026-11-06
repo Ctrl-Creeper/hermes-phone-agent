@@ -1244,6 +1244,11 @@ def return_phone_home(task_id: str = "") -> bool:
         return False
 
 
+# The reply's own budget (wechat.reply tries open_chat twice), spent during
+# the model call so the reply never has to navigate after it.
+_PREOPEN_FULL_ATTEMPTS = 2
+
+
 class ChatPreopen:
     """Open a WeChat chat while the model is still deciding whether to reply.
 
@@ -1278,16 +1283,18 @@ class ChatPreopen:
                 # Fast path first (notification banner, already open, one Back,
                 # list row). Only @-mentions and private chats are pre-opened,
                 # and those almost always get a reply, so when the fast path
-                # fails run the reply's own navigation now, during the model
-                # call, instead of after it.
+                # fails run everything the reply would run, including its one
+                # retry, now during the model call instead of after it.
                 result = open_visible_wechat_chat(backend, self.chat)
-                if not result.ok:
+                for attempt in range(_PREOPEN_FULL_ATTEMPTS):
                     with self._lock:
                         turn_over = self._finished
-                    if not turn_over:
-                        logger.info("WeChat pre-open fast path failed (%s); navigating fully",
-                                    result.message)
-                        result = open_wechat_chat(backend, self.chat)
+                    if result.ok or turn_over:
+                        break
+                    logger.info("WeChat pre-open %s failed (%s); full navigation attempt %d",
+                                "fast path" if attempt == 0 else "navigation", result.message,
+                                attempt + 1)
+                    result = open_wechat_chat(backend, self.chat)
                 with self._lock:
                     abandoned = self._abandoned
                     if result.ok and not abandoned:

@@ -53,10 +53,17 @@ def phone(monkeypatch):
         opened.append(chat)
         return ActionResult(ok=True, action="wechat_open_chat", message="opened")
 
+    full = []
+
+    def full_navigation(_backend, chat):
+        full.append(chat)
+        return ActionResult(ok=False, action="wechat_open_chat", message="full navigation failed")
+
     monkeypatch.setattr(tool, "_get_backend", lambda: backend)
     monkeypatch.setattr(tool, "open_visible_wechat_chat", open_chat)
+    monkeypatch.setattr(tool, "open_wechat_chat", full_navigation)
     monkeypatch.setattr(wechat, "_open_reply_chat", None)
-    yield SimpleNamespace(backend=backend, opened=opened)
+    yield SimpleNamespace(backend=backend, opened=opened, full=full)
     wechat._open_reply_chat = None
 
 
@@ -224,4 +231,53 @@ def test_open_finishing_after_finish_gave_up_cleans_up_itself(phone, monkeypatch
 
     assert phone.opened == [CHAT]
     assert wechat._open_reply_chat is None  # no hint a later reply could trust
+    assert phone.backend.keys == ["HOME"]
+
+
+def _fast_path_fails(monkeypatch):
+    monkeypatch.setattr(tool, "open_visible_wechat_chat",
+                        lambda b, chat: ActionResult(ok=False, action="wechat_open_chat", message="not on the list"))
+
+
+def test_failed_fast_path_navigates_fully_before_the_model_replies(phone, monkeypatch):
+    _fast_path_fails(monkeypatch)
+    monkeypatch.setattr(tool, "open_wechat_chat",
+                        lambda b, chat: (phone.full.append(chat), ActionResult(ok=True, action="wechat_open_chat"))[1])
+    preopen = _preopen_and_wait()
+
+    reused = wechat._reusable_open_chat(phone.backend, CHAT)  # the reply's first step
+    preopen.finish()
+
+    assert phone.full == [CHAT]
+    assert reused is not None and reused.ok and phone.backend.keys == []
+
+
+def test_full_navigation_failure_returns_home(phone, monkeypatch):
+    _fast_path_fails(monkeypatch)
+
+    _preopen_and_wait().finish()
+
+    assert phone.full == [CHAT]
+    assert wechat._open_reply_chat is None and phone.backend.keys == ["HOME"]
+
+
+def test_no_full_navigation_once_the_turn_has_ended(phone, monkeypatch):
+    # The model already stayed silent while the fast path ran: do not navigate for nothing.
+    release = threading.Event()
+    started = threading.Event()
+
+    def slow_fail(b, chat):
+        started.set(); release.wait(5)
+        return ActionResult(ok=False, action="wechat_open_chat", message="not on the list")
+
+    monkeypatch.setattr(tool, "open_visible_wechat_chat", slow_fail)
+    preopen = _REAL_PREOPEN(CHAT, TRUSTED)
+    started.wait(5)
+    finisher = threading.Thread(target=preopen.finish)
+    finisher.start()
+    while not preopen._finished:
+        threading.Event().wait(0.01)
+    release.set(); preopen._thread.join(5); finisher.join(5)
+
+    assert phone.full == []
     assert phone.backend.keys == ["HOME"]

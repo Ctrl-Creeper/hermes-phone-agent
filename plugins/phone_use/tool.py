@@ -1275,9 +1275,19 @@ class ChatPreopen:
                     if self._finished:
                         return  # The turn ended while this waited for the phone.
                     self._started = True
-                # Never the full open_chat(): its recovery gestures are for a
-                # reply that must get through, not for speculative work.
+                # Fast path first (notification banner, already open, one Back,
+                # list row). Only @-mentions and private chats are pre-opened,
+                # and those almost always get a reply, so when the fast path
+                # fails run the reply's own navigation now, during the model
+                # call, instead of after it.
                 result = open_visible_wechat_chat(backend, self.chat)
+                if not result.ok:
+                    with self._lock:
+                        turn_over = self._finished
+                    if not turn_over:
+                        logger.info("WeChat pre-open fast path failed (%s); navigating fully",
+                                    result.message)
+                        result = open_wechat_chat(backend, self.chat)
                 with self._lock:
                     abandoned = self._abandoned
                     if result.ok and not abandoned:

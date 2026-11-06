@@ -434,6 +434,27 @@ def test_chat_header_is_the_title_bar_not_the_first_message_sender():
     assert wechat._find_chat_header(chat_page, 'Other Group') is not None
 
 
+@pytest.fixture
+def emulator_clock(monkeypatch):
+    """Real wait limits on a virtual clock; each capture costs 0.6 s as measured live."""
+    clock = {"now": 0.0}
+    monkeypatch.setattr(wechat, "time", type("Clock", (), {
+        "monotonic": staticmethod(lambda: clock["now"]),
+        "sleep": staticmethod(lambda seconds: clock.__setitem__("now", clock["now"] + seconds)),
+    }))
+    monkeypatch.setattr(wechat, "_WECHAT_DRAW_SECONDS", 8.0)
+    monkeypatch.setattr(wechat, "_LIST_TAP_REACTION_SECONDS", 5.0)
+
+    def timed(frames):
+        frames = iter(frames)
+
+        def capture(mode='hierarchy'):
+            clock["now"] += 0.6
+            return next(frames)
+        return capture
+    return timed
+
+
 def _visible_chat_backend(screens):
     """Serves *screens* in order; records every input so recovery is visible."""
     inputs = []
@@ -511,15 +532,28 @@ def test_visible_chat_taps_its_chat_list_row_once():
     assert result.ok and inputs == ["launch", ("tap", 2)]
 
 
-def test_visible_chat_repeats_a_list_tap_that_wechat_ignored_once():
+def test_visible_chat_waits_for_a_slow_cold_open_instead_of_tapping_again(emulator_clock):
+    # A cold WeChat keeps showing the list for seconds after a row tap that
+    # did land; a second tap would then hit the chat as it opens.
     backend, inputs = _visible_chat_backend([_VISIBLE_LIST])
-    frames = iter([_VISIBLE_LIST, _VISIBLE_LIST, _VISIBLE_LIST, _VISIBLE_LIST, _VISIBLE_CHAT])
-    backend.capture = lambda mode='hierarchy': next(frames)
+    # ~3 s of list frames after a tap that did land, as recorded on a cold WeChat.
+    frames = [_VISIBLE_LIST] * 7 + [_VISIBLE_CHAT, _VISIBLE_CHAT]
+    backend.capture = emulator_clock(frames)
 
     result = wechat.open_visible_chat(backend, 'Example Group')
 
     assert result.ok
-    assert [i for i in inputs if i != "launch"] == [("tap", 2), ("tap", None)]  # one retap, same row
+    assert [i for i in inputs if i != "launch"] == [("tap", 2)]
+
+
+def test_visible_chat_repeats_a_dropped_list_tap_once():
+    # The list is still there after the whole reaction window: the tap was dropped.
+    backend, inputs = _visible_chat_backend([_VISIBLE_LIST, _VISIBLE_LIST, _VISIBLE_CHAT])
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert result.ok
+    assert [i for i in inputs if i != "launch"] == [("tap", 2), ("tap", None)]
 
 
 @pytest.mark.parametrize("screens", [
@@ -537,3 +571,47 @@ def test_visible_chat_gives_up_without_any_recovery_gesture(screens, monkeypatch
     assert not result.ok
     assert all(i == "launch" or i[0] == "tap" for i in inputs)  # no Back, swipe, search or typing
     assert sum(1 for i in inputs if i != "launch") <= 2  # at most a row tap and its single retap
+
+
+def test_visible_chat_waits_through_the_slide_in_frames(emulator_clock):
+    # Between the list and the open chat, WeChat slides the chat in over the
+    # list: the title is still off-centre, so the frame is neither.
+    slide = _page(text(1, 'WeChat (61)', (0, 107, 160, 155)), text(2, 'Example Group', (860, 104, 1080, 157)),
+                  UIElement(index=3, class_name='host.ocr.MessageInput', bounds=(110, 2165, 720, 2325)))
+    backend, inputs = _visible_chat_backend([_VISIBLE_LIST])
+    frames = [_VISIBLE_LIST] * 3 + [slide, slide, _VISIBLE_CHAT, _VISIBLE_CHAT]
+    backend.capture = emulator_clock(frames)
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert result.ok
+    assert [i for i in inputs if i != "launch"] == [("tap", 2)]
+
+
+def test_open_chat_cold_start_uses_one_tap_and_no_recovery(emulator_clock):
+    # Recorded on the emulator: splash for ~2 s after launch, the list, a row
+    # tap that takes ~3 s to open the chat, then a slide-in transition.
+    splash = _page(text(1, '1:43', (41, 16, 115, 53)))
+    slide = _page(text(1, 'WeChat (61)', (0, 107, 160, 155)), text(2, 'Example Group', (860, 104, 1080, 157)),
+                  UIElement(index=3, class_name='host.ocr.MessageInput', bounds=(110, 2165, 720, 2325)))
+    backend, inputs = _visible_chat_backend([_VISIBLE_LIST])
+    frames = [splash] * 4 + [_VISIBLE_LIST] * 7 + [slide, _VISIBLE_CHAT, _VISIBLE_CHAT, _VISIBLE_CHAT]
+    backend.capture = emulator_clock(frames)
+
+    result = wechat.open_chat(backend, 'Example Group')
+
+    assert result.ok
+    assert inputs == ["launch", ("tap", 2)]  # no Back, no retap, no search
+
+
+def test_launcher_frame_reported_as_wechat_is_not_a_drawn_wechat_ui():
+    # Recorded: Android reports WeChat in front while the launcher is still on
+    # screen. Its status-bar icons must not become a chat title and invent a composer.
+    launcher = [text(1, '•lg', (794, 10, 910, 56)), text(2, '2:31', (41, 17, 115, 49)),
+                text(3, 'Fri, Nov 6', (69, 201, 262, 256)), text(4, 'Play Store', (73, 1757, 244, 1801)),
+                text(5, 'Gmail', (362, 1757, 464, 1794))]
+    enriched = host_ocr.add_semantic_regions(launcher, package='com.tencent.mm', width=1080, height=2400)
+    frame = _page(*enriched)
+
+    assert not any(e.class_name == 'host.ocr.MessageInput' for e in enriched)
+    assert not wechat._wechat_ui_drawn(frame, 'Example Group')

@@ -373,6 +373,10 @@ def _settle_capture(
     return current
 
 
+# Longest a chat-list or search-result tap may take to open the chat.
+_LIST_TAP_REACTION_SECONDS = 5.0
+
+
 def _retap_if_still_on_list(
     backend: PhoneBackend,
     capture: CaptureResult,
@@ -381,9 +385,17 @@ def _retap_if_still_on_list(
 ) -> CaptureResult:
     """Repeat a list tap once if WeChat dropped it.
 
-    Right after a cold start WeChat draws the conversation list before it
-    accepts input. A still-visible list proves the first tap was not handled.
+    A list that stays on screen briefly is not proof: a cold-started WeChat
+    takes up to ~4 s to open a chat after a row tap (measured 2.8-4.0 s on
+    the emulator), and tapping again then lands inside the opening chat.
+    Wait on the wall clock before concluding the tap was dropped, and wait for
+    *done* itself: leaving the list is not enough, because the chat then
+    slides in over it for a few frames that are neither list nor chat.
     """
+    capture = _settle_capture(
+        backend, capture, done,
+        attempts=0, until=time.monotonic() + _LIST_TAP_REACTION_SECONDS,
+    )
     if done(capture) or not _is_conversation_list(capture):
         return capture
     x, y = target.center()
@@ -391,7 +403,8 @@ def _retap_if_still_on_list(
     retry = _run_and_capture(backend, "tap", lambda: backend.tap(x=x, y=y))
     if not retry.ok or retry.capture is None:
         return capture
-    return _settle_capture(backend, retry.capture, done)
+    return _settle_capture(backend, retry.capture, done,
+                           attempts=0, until=time.monotonic() + _LIST_TAP_REACTION_SECONDS)
 
 
 def _return_to_conversation_list(
@@ -977,6 +990,51 @@ def _prepare_text_input(
     return focused
 
 
+# A cold start shows the launcher for ~1.3 s and WeChat's splash for ~2 s before
+# any UI (measured 3.4 s on the 2 GB emulator, whose low-memory killer stops
+# WeChat in the background). Deciding on those frames starts needless recovery.
+_WECHAT_DRAW_SECONDS = 8.0
+
+
+def _has_title_bar(capture: CaptureResult) -> bool:
+    top, bottom = int(capture.height * 0.03), int(capture.height * 0.085)
+    return any(
+        top <= element.bounds[1] < bottom
+        and int(capture.width * 0.25) <= element.center()[0] <= int(capture.width * 0.75)
+        and _label(element).strip()
+        for element in capture.elements
+    )
+
+
+def _wechat_ui_drawn(capture: CaptureResult, chat: str = "") -> bool:
+    """WeChat's own UI is on screen, not the launcher or splash still showing.
+
+    The target's chat-list row also counts: neither of those shows it there.
+    """
+    if capture.current_package and capture.current_package != WECHAT_PACKAGE:
+        return False
+    if chat and _find_chat_header(capture, chat) is not None and _find_input(capture.elements) is None:
+        return False  # the target chat's title bar is painted, its body not yet
+    # Only what WeChat itself draws: the composer region is inferred from the
+    # layout (host_ocr), so it is not evidence that WeChat's UI is on screen.
+    return (_is_conversation_list(capture) or _is_search_page(capture)
+            or _find_conversation_tab(capture) is not None or _has_title_bar(capture)
+            or bool(chat and _find_text(_conversation_rows(capture), chat) is not None))
+
+
+def _wait_until_wechat_drawn(backend: PhoneBackend, capture: CaptureResult,
+                             chat: str = "") -> CaptureResult:
+    deadline = time.monotonic() + _WECHAT_DRAW_SECONDS
+    while not _wechat_ui_drawn(capture, chat) and time.monotonic() < deadline:
+        time.sleep(0.25)
+        try:
+            capture = backend.capture(mode="hierarchy")
+        except Exception as exc:
+            logger.warning("WeChat draw wait capture failed: %s", exc)
+            break
+    return capture
+
+
 def open_visible_chat(backend: PhoneBackend, chat: str) -> ActionResult:
     """Open *chat* only when it is already open or a row on the chat list.
 
@@ -999,13 +1057,8 @@ def open_visible_chat(backend: PhoneBackend, chat: str) -> ActionResult:
     capture = launch.capture
     if not launch.ok or capture is None:
         return failed(launch.message or "could not launch WeChat", capture)
-    # Right after launch, Android may already report WeChat while the screen
-    # still shows the launcher or a half-drawn frame. Look again; never act on it.
-    for _ in range(3):
-        if _chat_is_open(capture, chat) or _is_conversation_list(capture):
-            break
-        time.sleep(0.3)
-        capture = backend.capture(mode="hierarchy")
+    # Android reports WeChat while the launcher or splash is still on screen.
+    capture = _wait_until_wechat_drawn(backend, capture, chat)
     if _chat_is_open(capture, chat):
         return opened(capture)
     if not _is_conversation_list(capture):
@@ -1045,17 +1098,9 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
             capture=launch.capture,
         )
 
-    capture = launch.capture
-    # Android's launcher command can return before WeChat becomes foreground.
-    # Never run WeChat recovery gestures against a stale Launcher screenshot.
-    for _ in range(3):
-        if not capture.current_package or capture.current_package == WECHAT_PACKAGE:
-            break
-        try:
-            capture = backend.capture(mode="hierarchy")
-        except Exception as exc:
-            logger.warning("WeChat foreground wait capture failed: %s", exc)
-            break
+    # Never run recovery gestures against a launcher or splash frame: Android
+    # reports WeChat in front well before a cold start has drawn any UI.
+    capture = _wait_until_wechat_drawn(backend, launch.capture, chat)
     if capture.current_package and capture.current_package != WECHAT_PACKAGE:
         return ActionResult(
             ok=False, action="wechat_open_chat",
@@ -1081,30 +1126,6 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
             message=f"opened WeChat chat {chat!r}",
             capture=capture,
         )
-
-    # A cold/resumed LauncherUI may expose only a handful of OCR elements in
-    # its first frame. Wait for enough structure to identify a chat or list.
-    for _ in range(2):
-        list_elements = _conversation_rows(capture)
-        if input_element is not None or _find_text(list_elements, chat) is not None:
-            break
-        if _is_search_page(capture) or _find_conversation_tab(capture) is not None:
-            break
-        if len(capture.elements) >= 10:
-            break
-        try:
-            capture = backend.capture(mode="hierarchy")
-        except Exception as exc:
-            logger.warning("WeChat launch settle capture failed: %s", exc)
-            break
-        input_element = _find_input(capture.elements)
-        if _chat_is_open(capture, chat):
-            return ActionResult(
-                ok=True,
-                action="wechat_open_chat",
-                message=f"opened WeChat chat {chat!r}",
-                capture=capture,
-            )
 
     # WeChat often exposes a partially rendered chat frame while LauncherUI
     # resumes. Never navigate away from a chat based on that transient title.

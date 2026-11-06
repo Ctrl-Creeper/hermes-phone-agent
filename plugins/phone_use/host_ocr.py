@@ -50,10 +50,13 @@ def add_semantic_regions(
             element.attributes["message_direction"] = "outgoing"
 
     title_limit = max(220, int(height * 0.1))
+    # Status-bar text (clock, icons) sits above the title bar on every screen,
+    # including the launcher; counting it invented a WeChat composer there.
+    status_bar = int(height * 0.03)
     title_candidates = [
         element
         for element in elements
-        if element.bounds[1] < title_limit
+        if status_bar <= element.bounds[1] < title_limit
         and int(width * 0.2) <= element.center()[0] <= int(width * 0.8)
         and element.text.strip()
     ]

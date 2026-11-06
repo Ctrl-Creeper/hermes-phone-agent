@@ -35,3 +35,23 @@ def _no_real_ocr_helper(monkeypatch, tmp_path):
     monkeypatch.setattr(host_ocr, "_server", server)
     yield
     server.close()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_pause_state(monkeypatch, tmp_path):
+    # pause_gate resolves its file at import time, before HERMES_HOME is
+    # redirected, so tests would otherwise follow the developer's real
+    # ~/.hermes/phone-pause.json (and fail while the real phone is paused).
+    from plugins.phone_use import pause
+
+    monkeypatch.setattr(pause.pause_gate, "path", tmp_path / "phone-pause.json")
+
+
+@pytest.fixture(autouse=True)
+def _fast_wechat_waits(monkeypatch):
+    # Fakes that never draw a WeChat UI would otherwise sleep out the real
+    # draw deadline. Keep the wait logic, skip the wall-clock seconds.
+    from plugins.phone_use import wechat
+
+    monkeypatch.setattr(wechat, "_WECHAT_DRAW_SECONDS", 0.05)
+    monkeypatch.setattr(wechat, "_LIST_TAP_REACTION_SECONDS", 0.05)

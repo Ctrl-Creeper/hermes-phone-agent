@@ -181,6 +181,11 @@ welcome. This works only insofar as WeChat emits notifications accordingly:
   participation. Use a higher-priority explicit policy rule for a hard exclusion.
 - Being unmuted does not guarantee notification delivery, particularly when the
   relevant chat is open. Missing notifications are not recovered by this feature.
+- Batches likely to get a reply (a group @mention, or any private chat) open
+  that chat while the model decides, so a reply does not wait for navigation.
+  The reply still verifies the chat header first, and an unused open returns
+  Home after the turn. This widens the open-chat window above from the reply
+  alone to the model call plus the reply.
 - Only authenticated helper events classified `group` or `private`, with a
   usable conversation title and that mode enabled, enter its buffer. Summary
   notifications do not.

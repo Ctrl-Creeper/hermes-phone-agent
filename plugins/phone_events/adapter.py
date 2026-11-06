@@ -489,6 +489,26 @@ def _return_phone_home() -> None:
     return_phone_home()
 
 
+def _preopen_batch_chat(batch: Optional[ConversationBatch]):
+    """Open the chat during the model call when a reply is likely.
+
+    Measured over two weeks: invited group batches got a reply 95% of the
+    time, private batches ~66%, uninvited group batches 8%. Opening marks the
+    chat read and WeChat does not notify for the chat on screen, so uninvited
+    group chatter is left alone.
+    """
+    if batch is None or not (batch.invited or batch.conversation_type == "private"):
+        return None
+    try:
+        from hermes_plugins.phone_use.tool import preopen_wechat_chat
+    except ImportError:
+        try:
+            from plugins.phone_use.tool import preopen_wechat_chat
+        except ImportError:
+            return None
+    return preopen_wechat_chat(batch.destination)
+
+
 @contextmanager
 def _bind_report_origin(phone_event: Any, decision: Any):
     origin = None
@@ -566,9 +586,14 @@ async def _dispatch_with_event_policy(
             await _wait_phone_session(telegram_adapter, key)
             if _phone_is_paused():
                 return
-            with _event_policy_scope(decision), _bind_report_origin(phone_event, decision), bind_conversation_turn(batch):
-                await telegram_adapter.handle_message(message)
-                await _wait_phone_session(telegram_adapter, key)
+            preopen = _preopen_batch_chat(batch)
+            try:
+                with _event_policy_scope(decision), _bind_report_origin(phone_event, decision), bind_conversation_turn(batch):
+                    await telegram_adapter.handle_message(message)
+                    await _wait_phone_session(telegram_adapter, key)
+            finally:
+                if preopen is not None:
+                    await asyncio.to_thread(preopen.finish)
         return
 
     # Synchronous adapters (including older integrations) finish on return.

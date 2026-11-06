@@ -23,6 +23,7 @@ from .backend import (
     UIElement,
 )
 from .policy import bind_event_policy as bind_event_policy, get_event_policy, get_policy
+from .wechat import forget_open_chat, remember_open_chat
 from .wechat import open_chat as open_wechat_chat
 from .wechat import reply as reply_to_wechat
 from .wechat import accept_friend_request as accept_wechat_friend_request
@@ -1240,6 +1241,79 @@ def return_phone_home(task_id: str = "") -> bool:
     except Exception:
         logger.exception("Could not return phone to Home after workflow")
         return False
+
+
+class ChatPreopen:
+    """Open a WeChat chat while the model is still deciding whether to reply.
+
+    The trusted reply path reuses a chat it finds already open (re-verifying
+    the header first), so opening it during the model call hides most of the
+    navigation. The host must call :meth:`finish` once the turn has ended: it
+    stops an open that has not started yet and, if no reply used the chat,
+    returns the phone Home.
+    """
+
+    def __init__(self, chat: str) -> None:
+        self.chat = chat
+        self._lock = threading.Lock()
+        self._finished = False
+        self._started = False
+        self._token: Optional[tuple] = None
+        self._thread = threading.Thread(target=self._run, name="wechat-preopen", daemon=True)
+
+    def _run(self) -> None:
+        started = time.monotonic()
+        try:
+            generation = pause_gate.ensure_active()
+            if not get_policy().check_action("wechat_reply", "com.tencent.mm").action_allowed("wechat_reply"):
+                return
+            backend = _GuardedBackend(_get_backend(), generation)
+            with _device_operation_queue.turn("wechat_preopen", generation=generation):
+                with self._lock:
+                    if self._finished:
+                        return  # The turn ended while this waited for the phone.
+                    self._started = True
+                result = open_wechat_chat(backend, self.chat)
+                if result.ok:
+                    self._token = remember_open_chat(self.chat)
+            logger.info("WeChat pre-open %s in %.1fs: %s",
+                        "ready" if result.ok else "failed",
+                        time.monotonic() - started, result.message)
+        except PhonePaused:
+            pass
+        except Exception:
+            logger.exception("WeChat pre-open failed")
+
+    def finish(self, timeout: float = 60.0) -> None:
+        with self._lock:
+            self._finished = True
+            started = self._started
+        if not started:
+            return
+        self._thread.join(timeout)
+        if self._token is None:
+            return
+        try:
+            generation = pause_gate.ensure_active()  # never press Home on a paused phone
+            backend = _GuardedBackend(_get_backend(), generation)
+            # Under the queue, so a newer pre-open or reply cannot be undone.
+            with _device_operation_queue.turn("wechat_preopen_cleanup", generation=generation):
+                if forget_open_chat(self._token):
+                    backend.keyevent("HOME")
+                    logger.info("WeChat pre-open unused; returned Home")
+        except PhonePaused:
+            forget_open_chat(self._token)
+        except Exception:
+            logger.exception("WeChat pre-open cleanup failed")
+
+
+def preopen_wechat_chat(chat: str) -> Optional[ChatPreopen]:
+    """Start opening *chat* in the background; see :class:`ChatPreopen`."""
+    if not isinstance(chat, str) or not chat.strip():
+        return None
+    preopen = ChatPreopen(chat.strip())
+    preopen._thread.start()
+    return preopen
 
 
 def accept_approved_wechat_friend_request(requester: str) -> str:

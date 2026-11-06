@@ -1285,6 +1285,22 @@ _open_reply_chat: Optional[tuple[str, float]] = None
 _OPEN_REPLY_CHAT_TTL = 120.0
 
 
+def remember_open_chat(chat: str) -> tuple[str, float]:
+    """Mark *chat* as open for the next reply; returns the hint as a token."""
+    global _open_reply_chat
+    _open_reply_chat = (_normalize_chat_title(chat), time.monotonic())
+    return _open_reply_chat
+
+
+def forget_open_chat(token: tuple[str, float]) -> bool:
+    """Drop *token* if no reply has used or replaced it; True when dropped."""
+    global _open_reply_chat
+    if _open_reply_chat is not token:
+        return False
+    _open_reply_chat = None
+    return True
+
+
 def _reusable_open_chat(backend: PhoneBackend, chat: str) -> Optional[ActionResult]:
     global _open_reply_chat
     hint, _open_reply_chat = _open_reply_chat, None
@@ -1493,8 +1509,7 @@ def reply(backend: PhoneBackend, chat: str, text: str, *, quote_text: str = '',
                 )
             if result.ok:
                 if not return_home:
-                    global _open_reply_chat
-                    _open_reply_chat = (_normalize_chat_title(chat), time.monotonic())
+                    remember_open_chat(chat)
                 return result
             if quote_text or result.meta.get("delivery_attempted"):
                 return result

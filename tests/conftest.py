@@ -14,3 +14,11 @@ def _no_device_frames(monkeypatch):
     from plugins.phone_use import adb_backend
 
     monkeypatch.setattr(adb_backend.AdbBackend, "_recognize_raw_screen", lambda self: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_background_preopen(monkeypatch):
+    # Dispatch tests must never open a chat on a real emulator behind their back.
+    from plugins.phone_use import tool
+
+    monkeypatch.setattr(tool, "preopen_wechat_chat", lambda chat: None)

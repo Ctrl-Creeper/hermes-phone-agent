@@ -54,7 +54,7 @@ def phone(monkeypatch):
         return ActionResult(ok=True, action="wechat_open_chat", message="opened")
 
     monkeypatch.setattr(tool, "_get_backend", lambda: backend)
-    monkeypatch.setattr(tool, "open_wechat_chat", open_chat)
+    monkeypatch.setattr(tool, "open_visible_wechat_chat", open_chat)
     monkeypatch.setattr(wechat, "_open_reply_chat", None)
     yield SimpleNamespace(backend=backend, opened=opened)
     wechat._open_reply_chat = None
@@ -119,13 +119,14 @@ def test_preopen_respects_app_policy_blocking_replies(phone, monkeypatch):
     assert phone.opened == [] and phone.backend.keys == []
 
 
-def test_failed_open_leaves_no_hint_and_no_home(phone, monkeypatch):
-    monkeypatch.setattr(tool, "open_wechat_chat",
+def test_failed_open_leaves_no_hint_and_returns_home(phone, monkeypatch):
+    monkeypatch.setattr(tool, "open_visible_wechat_chat",
                         lambda b, chat: ActionResult(ok=False, action="wechat_open_chat", message="not found"))
 
     _preopen_and_wait().finish()
 
-    assert wechat._open_reply_chat is None and phone.backend.keys == []
+    assert wechat._open_reply_chat is None
+    assert phone.backend.keys == ["HOME"]  # no half-navigated WeChat left behind
 
 
 # ── adapter gating ───────────────────────────────────────────────────────
@@ -212,7 +213,7 @@ def test_open_finishing_after_finish_gave_up_cleans_up_itself(phone, monkeypatch
         phone.opened.append(chat)
         return ActionResult(ok=True, action="wechat_open_chat", message="opened")
 
-    monkeypatch.setattr(tool, "open_wechat_chat", slow_open)
+    monkeypatch.setattr(tool, "open_visible_wechat_chat", slow_open)
     preopen = _REAL_PREOPEN(CHAT, TRUSTED)
     while not preopen._started:
         threading.Event().wait(0.01)

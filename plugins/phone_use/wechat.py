@@ -977,6 +977,55 @@ def _prepare_text_input(
     return focused
 
 
+def open_visible_chat(backend: PhoneBackend, chat: str) -> ActionResult:
+    """Open *chat* only when it is already open or a row on the chat list.
+
+    For speculative navigation: no Back, swipe or search recovery, so an
+    unexpected screen ends the attempt instead of a run of recovery gestures.
+    Callers that must reach the chat use :func:`open_chat`.
+    """
+    chat = chat.strip()
+
+    def failed(message: str, capture: Optional[CaptureResult] = None) -> ActionResult:
+        return ActionResult(ok=False, action="wechat_open_chat", message=message, capture=capture)
+
+    def opened(capture: CaptureResult) -> ActionResult:
+        return ActionResult(ok=True, action="wechat_open_chat",
+                            message=f"opened WeChat chat {chat!r}", capture=capture)
+
+    if not chat or _EMOJI_PLACEHOLDER.search(chat):
+        return failed("chat is not a plain visible title")
+    launch = _run_and_capture(backend, "launch_app", lambda: backend.launch_app(WECHAT_PACKAGE))
+    capture = launch.capture
+    if not launch.ok or capture is None:
+        return failed(launch.message or "could not launch WeChat", capture)
+    # Right after launch, Android may already report WeChat while the screen
+    # still shows the launcher or a half-drawn frame. Look again; never act on it.
+    for _ in range(3):
+        if _chat_is_open(capture, chat) or _is_conversation_list(capture):
+            break
+        time.sleep(0.3)
+        capture = backend.capture(mode="hierarchy")
+    if _chat_is_open(capture, chat):
+        return opened(capture)
+    if not _is_conversation_list(capture):
+        return failed("WeChat is not on the chat list", capture)
+    target = _find_text(_conversation_rows(capture), chat)
+    if target is None:
+        return failed("chat is not a visible chat-list row", capture)
+    tapped = _run_and_capture(backend, "tap", lambda: backend.tap(element=target.index))
+    if tapped.capture is None:
+        return failed(tapped.message or "chat-list tap failed")
+    done = lambda value: _chat_is_open(value, chat)  # noqa: E731
+    settled = _settle_capture(backend, tapped.capture, done)  # the chat may still be sliding in
+    # WeChat often ignores the first list tap after a resume; repeat it once,
+    # only while the same list is still on screen.
+    settled = _retap_if_still_on_list(backend, settled, target, done)
+    if done(settled):
+        return opened(settled)
+    return failed("tapping the chat-list row did not open the chat", settled)
+
+
 def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
     """Launch WeChat and open one visible conversation using host OCR."""
     chat = chat.strip()

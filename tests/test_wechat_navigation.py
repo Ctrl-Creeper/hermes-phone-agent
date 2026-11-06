@@ -432,3 +432,108 @@ def test_chat_header_is_the_title_bar_not_the_first_message_sender():
                                        bounds=(110, 2165, 720, 2325))], '.ui.LauncherUI')
     assert wechat._find_chat_header(chat_page, 'Void_DRS') is None
     assert wechat._find_chat_header(chat_page, 'Other Group') is not None
+
+
+def _visible_chat_backend(screens):
+    """Serves *screens* in order; records every input so recovery is visible."""
+    inputs = []
+
+    class Backend:
+        def __init__(self):
+            self.screen = 0
+
+        def launch_app(self, package):
+            inputs.append("launch")
+            return ActionResult(ok=True, action='launch_app')
+
+        def capture(self, mode='hierarchy'):
+            capture = screens[min(self.screen, len(screens) - 1)]
+            return capture
+
+        def tap(self, *, element=None, x=None, y=None):
+            inputs.append(("tap", element))
+            self.screen += 1
+            return ActionResult(ok=True, action='tap')
+
+        def keyevent(self, key):
+            inputs.append(("key", key))
+            return ActionResult(ok=True, action='keyevent')
+
+        def swipe(self, **kwargs):
+            inputs.append("swipe")
+            return ActionResult(ok=True, action='swipe')
+
+        def set_text(self, text, element=None):
+            inputs.append("type")
+            return ActionResult(ok=True, action='set_text')
+
+    return Backend(), inputs
+
+
+def _page(*elements, activity='.ui.LauncherUI'):
+    return CaptureResult(mode='hierarchy', width=1080, height=2400, current_package='com.tencent.mm',
+                         current_activity=activity, elements=list(elements))
+
+
+_VISIBLE_LIST = _page(text(1, 'WeChat', (456, 107, 628, 155)), text(2, 'Example Group', (202, 244, 523, 287)),
+              text(3, 'WeChat', (100, 2287, 200, 2318)), text(4, 'Contacts', (337, 2287, 471, 2318)))
+_VISIBLE_CHAT = _page(text(1, 'Example Group', (320, 104, 704, 157)),
+              UIElement(index=2, class_name='host.ocr.MessageInput', bounds=(110, 2165, 720, 2325)))
+_VISIBLE_OTHER = _page(text(1, 'Someone Else', (320, 104, 704, 157)),
+                    UIElement(index=2, class_name='host.ocr.MessageInput', bounds=(110, 2165, 720, 2325)))
+
+
+def test_visible_chat_reuses_an_already_open_chat_without_input():
+    backend, inputs = _visible_chat_backend([_VISIBLE_CHAT])
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert result.ok and inputs == ["launch"]
+
+
+def test_visible_chat_waits_out_a_stale_launch_frame_without_input(monkeypatch):
+    monkeypatch.setattr(wechat.time, "sleep", lambda s: None)
+    stale = _page(text(1, '1:29', (41, 16, 115, 53)))  # launcher still drawn, WeChat reported
+    backend, inputs = _visible_chat_backend([stale])
+    frames = iter([stale, stale, _VISIBLE_CHAT])
+    backend.capture = lambda mode='hierarchy': next(frames)
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert result.ok and inputs == ["launch"]
+
+
+def test_visible_chat_taps_its_chat_list_row_once():
+    backend, inputs = _visible_chat_backend([_VISIBLE_LIST, _VISIBLE_CHAT])
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert result.ok and inputs == ["launch", ("tap", 2)]
+
+
+def test_visible_chat_repeats_a_list_tap_that_wechat_ignored_once():
+    backend, inputs = _visible_chat_backend([_VISIBLE_LIST])
+    frames = iter([_VISIBLE_LIST, _VISIBLE_LIST, _VISIBLE_LIST, _VISIBLE_LIST, _VISIBLE_CHAT])
+    backend.capture = lambda mode='hierarchy': next(frames)
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert result.ok
+    assert [i for i in inputs if i != "launch"] == [("tap", 2), ("tap", None)]  # one retap, same row
+
+
+@pytest.mark.parametrize("screens", [
+    [_VISIBLE_OTHER],                     # another chat is open
+    [_page(text(1, 'Settings', (420, 104, 660, 157)))],  # some unrelated page
+    [_VISIBLE_LIST.__class__(**{**_VISIBLE_LIST.__dict__, 'elements': _VISIBLE_LIST.elements[:1] + _VISIBLE_LIST.elements[2:]})],  # row not visible
+    [_VISIBLE_LIST, _VISIBLE_LIST],                    # WeChat ignored the row tap
+])
+def test_visible_chat_gives_up_without_any_recovery_gesture(screens, monkeypatch):
+    monkeypatch.setattr(wechat.time, "sleep", lambda s: None)
+    backend, inputs = _visible_chat_backend(screens)
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert not result.ok
+    assert all(i == "launch" or i[0] == "tap" for i in inputs)  # no Back, swipe, search or typing
+    assert sum(1 for i in inputs if i != "launch") <= 2  # at most a row tap and its single retap

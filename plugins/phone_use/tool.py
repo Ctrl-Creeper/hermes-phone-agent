@@ -25,6 +25,7 @@ from .backend import (
 from .policy import bind_event_policy as bind_event_policy, get_event_policy, get_policy
 from .wechat import forget_open_chat, remember_open_chat
 from .wechat import open_chat as open_wechat_chat
+from .wechat import open_visible_chat as open_visible_wechat_chat
 from .wechat import reply as reply_to_wechat
 from .wechat import accept_friend_request as accept_wechat_friend_request
 from .wechat import send_attachment
@@ -1274,13 +1275,16 @@ class ChatPreopen:
                     if self._finished:
                         return  # The turn ended while this waited for the phone.
                     self._started = True
-                result = open_wechat_chat(backend, self.chat)
+                # Never the full open_chat(): its recovery gestures are for a
+                # reply that must get through, not for speculative work.
+                result = open_visible_wechat_chat(backend, self.chat)
                 with self._lock:
                     abandoned = self._abandoned
                     if result.ok and not abandoned:
                         self._token = remember_open_chat(self.chat)
-                if result.ok and abandoned:
-                    # finish() stopped waiting; no reply and no cleanup will follow.
+                if not result.ok or abandoned:
+                    # Nothing will use this screen: a failed attempt leaves no
+                    # half-navigated WeChat, and an abandoned one has no cleanup.
                     backend.keyevent("HOME")
             logger.info("WeChat pre-open %s in %.1fs: %s",
                         "ready" if result.ok else "failed",

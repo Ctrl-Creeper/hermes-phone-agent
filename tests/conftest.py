@@ -21,4 +21,4 @@ def _no_background_preopen(monkeypatch):
     # Dispatch tests must never open a chat on a real emulator behind their back.
     from plugins.phone_use import tool
 
-    monkeypatch.setattr(tool, "preopen_wechat_chat", lambda chat: None)
+    monkeypatch.setattr(tool, "preopen_wechat_chat", lambda chat, decision: None)

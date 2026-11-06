@@ -489,7 +489,7 @@ def _return_phone_home() -> None:
     return_phone_home()
 
 
-def _preopen_batch_chat(batch: Optional[ConversationBatch]):
+def _preopen_batch_chat(batch: Optional[ConversationBatch], decision: Any):
     """Open the chat during the model call when a reply is likely.
 
     Measured over two weeks: invited group batches got a reply 95% of the
@@ -506,7 +506,7 @@ def _preopen_batch_chat(batch: Optional[ConversationBatch]):
             from plugins.phone_use.tool import preopen_wechat_chat
         except ImportError:
             return None
-    return preopen_wechat_chat(batch.destination)
+    return preopen_wechat_chat(batch.destination, decision)
 
 
 @contextmanager
@@ -586,7 +586,7 @@ async def _dispatch_with_event_policy(
             await _wait_phone_session(telegram_adapter, key)
             if _phone_is_paused():
                 return
-            preopen = _preopen_batch_chat(batch)
+            preopen = _preopen_batch_chat(batch, decision)
             try:
                 with _event_policy_scope(decision), _bind_report_origin(phone_event, decision), bind_conversation_turn(batch):
                     await telegram_adapter.handle_message(message)

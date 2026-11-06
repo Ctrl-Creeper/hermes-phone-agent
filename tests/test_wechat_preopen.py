@@ -19,6 +19,9 @@ from plugins.phone_use.policy import PolicyDecision
 _REAL_PREOPEN = tool.preopen_wechat_chat
 
 CHAT = "Example Group"
+# The turn decision a participation batch gets: trusted automatic reply.
+TRUSTED = PolicyDecision(behavior="auto", instruction_source=True,
+                         allowed_actions=frozenset({"wechat_reply", "wechat_collect_context"}))
 
 
 def _open_chat_page() -> CaptureResult:
@@ -58,7 +61,7 @@ def phone(monkeypatch):
 
 
 def _preopen_and_wait(chat=CHAT):
-    preopen = _REAL_PREOPEN(chat)
+    preopen = _REAL_PREOPEN(chat, TRUSTED)
     preopen._thread.join(5)
     return preopen
 
@@ -87,7 +90,7 @@ def test_preopen_never_starts_once_the_turn_has_ended(phone):
     # Another task owns the phone, so the pre-open waits in the device queue.
     tool._device_operation_queue._owner = "other-task"
     try:
-        preopen = _REAL_PREOPEN(CHAT)
+        preopen = _REAL_PREOPEN(CHAT, TRUSTED)
         preopen.finish()  # the silent turn ends before the phone is free
     finally:
         tool._device_operation_queue.release("other-task")
@@ -147,8 +150,9 @@ def test_only_likely_replies_are_preopened_and_finished_after_the_turn(monkeypat
         def finish(self):
             events.append("finish")
 
-    def preopen(chat):
+    def preopen(chat, decision):
         events.append(("preopen", chat))
+        assert decision is TRUSTED  # the turn's own policy reaches the gate
         return Preopen()
 
     monkeypatch.setattr(tool, "preopen_wechat_chat", preopen)
@@ -165,7 +169,7 @@ def test_only_likely_replies_are_preopened_and_finished_after_the_turn(monkeypat
                 self._session_tasks["lane"] = asyncio.create_task(turn())
 
         await adapter._dispatch_with_event_policy(
-            Gateway(), SimpleNamespace(channel_prompt=None, source=object()), PolicyDecision(),
+            Gateway(), SimpleNamespace(channel_prompt=None, source=object()), TRUSTED,
             phone_event=PhoneEvent("notification", meta={"_participation_batch": batch}))
 
     asyncio.run(scenario())
@@ -184,3 +188,39 @@ def test_unused_preopen_does_not_press_home_on_a_paused_phone(phone):
 
     assert phone.backend.keys == []
     assert wechat._open_reply_chat is None
+
+
+@pytest.mark.parametrize("decision", [
+    None,
+    PolicyDecision(behavior="report", instruction_source=True),
+    PolicyDecision(behavior="auto"),  # automatic, but no trusted instruction source
+    PolicyDecision(behavior="auto", instruction_source=True,
+                   allowed_actions=frozenset({"wechat_collect_context"})),
+    PolicyDecision(behavior="auto", instruction_source=True,
+                   blocked_actions=frozenset({"wechat_reply"})),
+])
+def test_preopen_requires_the_turn_to_be_allowed_to_reply(phone, decision):
+    assert _REAL_PREOPEN(CHAT, decision) is None
+    assert phone.opened == []
+
+
+def test_open_finishing_after_finish_gave_up_cleans_up_itself(phone, monkeypatch):
+    release = threading.Event()
+
+    def slow_open(_backend, chat):
+        release.wait(5)
+        phone.opened.append(chat)
+        return ActionResult(ok=True, action="wechat_open_chat", message="opened")
+
+    monkeypatch.setattr(tool, "open_wechat_chat", slow_open)
+    preopen = _REAL_PREOPEN(CHAT, TRUSTED)
+    while not preopen._started:
+        threading.Event().wait(0.01)
+
+    preopen.finish(timeout=0.05)  # the turn stops waiting for a slow open
+    release.set()
+    preopen._thread.join(5)
+
+    assert phone.opened == [CHAT]
+    assert wechat._open_reply_chat is None  # no hint a later reply could trust
+    assert phone.backend.keys == ["HOME"]

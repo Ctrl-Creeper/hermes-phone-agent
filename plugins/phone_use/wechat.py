@@ -771,12 +771,16 @@ def _search_for_chat(
     )
 
 
-def _find_send(capture: CaptureResult) -> Optional[UIElement]:
-    elements = capture.elements
-    labelled = next(
-        (element for element in elements if _label(element).casefold() in _SEND_LABELS),
+def _labelled_send(capture: CaptureResult) -> Optional[UIElement]:
+    return next(
+        (element for element in capture.elements if _label(element).casefold() in _SEND_LABELS),
         None,
     )
+
+
+def _find_send(capture: CaptureResult) -> Optional[UIElement]:
+    elements = capture.elements
+    labelled = _labelled_send(capture)
     if labelled is not None:
         return labelled
 
@@ -799,6 +803,16 @@ def _reply_key(text: str) -> str:
     # Compare letters and digits only, or most such replies read as uncertain.
     decomposed = unicodedata.normalize("NFKD", text)
     return re.sub(r"[\W_]+", "", decomposed).casefold()
+
+
+def _reply_delivered(capture: CaptureResult, text: str) -> bool:
+    """The reply shows as a message and the composer no longer holds it.
+
+    WeChat shows the Send button only while the composer has text, and the
+    composer's position moves with the keyboard, so a draft can read as a
+    visible reply. A labelled Send button means the draft is still unsent.
+    """
+    return _labelled_send(capture) is None and _contains_reply(capture, text)
 
 
 def _contains_reply(capture: CaptureResult, text: str) -> bool:
@@ -1397,18 +1411,18 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str 
     # when fresh captures keep showing the Send button: after a real send the
     # draft clears and that button disappears. Use its current coordinates so
     # a refreshed OCR element index cannot point at a different control.
-    if not quote_text and not _contains_reply(sent.capture, text) and _find_send(sent.capture) is not None:
+    if not quote_text and not _reply_delivered(sent.capture, text) and _find_send(sent.capture) is not None:
         sent.capture = _settle_capture(
             backend,
             sent.capture,
             lambda value: (
-                _contains_reply(value, text) or _find_send(value) is None
+                _reply_delivered(value, text) or _find_send(value) is None
             ),
             attempts=2,
             until=tapped_at + _SEND_REACTION_SECONDS,
         )
         retry_send = _find_send(sent.capture)
-        if not _contains_reply(sent.capture, text) and retry_send is not None:
+        if not _reply_delivered(sent.capture, text) and retry_send is not None:
             retry_x, retry_y = retry_send.center()
             logger.warning(
                 "WeChat Send remained visible after tap; retrying at (%d, %d)",
@@ -1434,7 +1448,7 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str 
                 )
 
     def delivery_visible(value):
-        if not _contains_reply(value, text):
+        if not _reply_delivered(value, text):
             return False
         if not quote_text:
             return True

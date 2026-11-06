@@ -1719,7 +1719,7 @@ def test_wechat_reply_switches_voice_modes_before_entering_text():
                 bounds=(476, 2161, 597, 2203),
                 clickable=True,
             ))
-            if state["typed"]:
+            if state["typed"] and not state["sent"]:  # Send shows only while a draft is unsent
                 elements.append(UIElement(
                     index=20,
                     class_name="host.ocr.Text",
@@ -4870,3 +4870,71 @@ def test_wechat_reply_does_not_retap_send_when_wechat_is_slow_but_sent(monkeypat
 
     assert state["send_taps"] == 1
     assert result.ok and result.meta["delivery_status"] == "confirmed"
+
+
+def _keyboard_up_reply_backend(monkeypatch, sends_on_tap):
+    """WeChat with the keyboard shown, laid out as in a real dropped-Send capture.
+
+    The composer then sits above the keyboard, far from the layout-based
+    MessageInput region at the bottom, so the unsent draft is ordinary text.
+    """
+    clock = {"now": 0.0}
+    monkeypatch.setattr(wechat_module, "time", types.SimpleNamespace(
+        monotonic=lambda: clock["now"],
+        sleep=lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    ))
+    chat = [
+        UIElement(index=1, class_name="host.ocr.Text", text="Example Chat", bounds=(320, 104, 756, 157)),
+        UIElement(index=2, class_name="host.ocr.Text", text="are you there", bounds=(202, 1196, 520, 1246)),
+        UIElement(index=3, class_name="host.ocr.Text", text="QWERTYUIOP", bounds=(108, 1650, 969, 1749)),
+        UIElement(index=9, class_name="host.ocr.MessageInput", text="[WeChat message input]",
+                  bounds=(110, 2165, 720, 2325), clickable=True, focusable=True),
+    ]
+    draft = [UIElement(index=4, class_name="host.ocr.Text", text="yes what's up", bounds=(149, 1363, 420, 1420)),
+             UIElement(index=5, class_name="host.ocr.Text", text="Send", bounds=(930, 1419, 1035, 1466),
+                       clickable=True)]
+    bubble = [UIElement(index=6, class_name="host.ocr.Text", text="yes what's up", bounds=(640, 1290, 900, 1340))]
+    state = {"typed": False, "send_taps": 0, "sent": False}
+
+    class Backend:
+        def capture(self, mode):
+            clock["now"] += 0.5
+            extra = bubble if state["sent"] else draft if state["typed"] else []
+            return phone_tool.CaptureResult(mode=mode, width=1080, height=2400, elements=[*chat, *extra],
+                                            current_package="com.tencent.mm")
+
+        def tap(self, *, element=None, x=None, y=None):
+            if element == 5 or (x, y) == (982, 1442):
+                state["send_taps"] += 1
+                state["sent"] = state["sent"] or sends_on_tap(state["send_taps"])
+            return phone_tool.ActionResult(ok=True, action="tap")
+
+        def set_text(self, text, element=None):
+            state["typed"] = True
+            return phone_tool.ActionResult(ok=True, action="set_text")
+
+    backend = Backend()
+    opened = phone_tool.ActionResult(ok=True, action="wechat_open_chat", capture=backend.capture("hierarchy"))
+    monkeypatch.setattr(wechat_module, "open_chat", lambda b, chat: opened)
+    monkeypatch.setattr(wechat_module, "_prepare_text_input",
+                        lambda b, capture: phone_tool.ActionResult(ok=True, action="tap", capture=capture))
+    return backend, state
+
+
+def test_unsent_draft_above_the_keyboard_is_not_a_delivered_reply(monkeypatch):
+    # WeChat dropped the first Send tap; the draft stayed in the composer.
+    backend, state = _keyboard_up_reply_backend(monkeypatch, sends_on_tap=lambda tap: tap >= 2)
+
+    result = wechat_module._reply_once(backend, "Example Chat", "yes what's up")
+
+    assert state["send_taps"] == 2  # the draft was noticed and Send retried
+    assert result.ok and result.meta["delivery_status"] == "confirmed"
+
+
+def test_draft_that_never_sends_is_reported_uncertain_not_confirmed(monkeypatch):
+    backend, state = _keyboard_up_reply_backend(monkeypatch, sends_on_tap=lambda tap: False)
+
+    result = wechat_module._reply_once(backend, "Example Chat", "yes what's up")
+
+    assert state["send_taps"] == 2  # one retry, never a third tap
+    assert not result.ok and result.meta["delivery_status"] == "uncertain"

@@ -344,21 +344,32 @@ def _is_search_page(capture: CaptureResult) -> bool:
     )
 
 
+# How long WeChat gets to react to a Send tap before the host concludes the tap
+# was dropped. A wall-clock floor, not a capture count: once captures got fast,
+# a count-based wait shrank and a slow-but-real send could be tapped twice.
+_SEND_REACTION_SECONDS = 3.0
+
+
 def _settle_capture(
     backend: PhoneBackend,
     capture: CaptureResult,
     predicate: Callable[[CaptureResult], bool],
     attempts: int = 2,
+    until: float = 0.0,
 ) -> CaptureResult:
+    """Re-capture until *predicate* holds, for *attempts* captures and, if
+    given, at least until the ``time.monotonic()`` deadline *until*."""
     current = capture
-    for _ in range(attempts):
-        if predicate(current):
-            break
+    tries = 0
+    while not predicate(current) and (tries < attempts or time.monotonic() < until):
+        if tries >= attempts:
+            time.sleep(0.25)
         try:
             current = backend.capture(mode="hierarchy")
         except Exception as exc:
             logger.warning("WeChat settle capture failed: %s", exc)
             break
+        tries += 1
     return current
 
 
@@ -1371,6 +1382,7 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str 
     reply_already_visible = bool(quote_text and _contains_reply(typed.capture, text))
     if on_delivery is not None:
         on_delivery("attempted")  # Commit before issuing the irreversible tap.
+    tapped_at = time.monotonic()
     sent = _run_and_capture(backend, "tap", lambda: backend.tap(element=send.index))
     if not sent.ok or sent.capture is None:
         return ActionResult(
@@ -1393,6 +1405,7 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str 
                 _contains_reply(value, text) or _find_send(value) is None
             ),
             attempts=2,
+            until=tapped_at + _SEND_REACTION_SECONDS,
         )
         retry_send = _find_send(sent.capture)
         if not _contains_reply(sent.capture, text) and retry_send is not None:
@@ -1402,6 +1415,7 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str 
                 retry_x,
                 retry_y,
             )
+            tapped_at = time.monotonic()
             sent = _run_and_capture(
                 backend,
                 "tap",
@@ -1430,7 +1444,8 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str 
                 and not _quote_preview(value, quote_meta['quote_text'], quote_sender)
                 and _chat_is_open(value, resolved_chat))
 
-    sent.capture = _settle_capture(backend, sent.capture, delivery_visible)
+    sent.capture = _settle_capture(backend, sent.capture, delivery_visible,
+                                   until=tapped_at + _SEND_REACTION_SECONDS)
     if delivery_visible(sent.capture):
         if on_delivery is not None:
             on_delivery("confirmed")

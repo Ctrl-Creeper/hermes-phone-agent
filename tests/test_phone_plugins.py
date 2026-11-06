@@ -4814,3 +4814,59 @@ def test_global_restrict_covers_every_wechat_write_action_and_warns_on_unknown(c
     assert {"wechat_accept_friend", "wechat_send_attachment", "wechat_favorite"} <= policy.global_restrict
     assert "wechat_typo" not in policy.global_restrict
     assert "wechat_typo" in caplog.text
+
+
+def test_wechat_reply_does_not_retap_send_when_wechat_is_slow_but_sent(monkeypatch):
+    # Fast captures must not shorten how long WeChat gets to react: the send
+    # went through, but the composer only clears 2 s after the tap.
+    clock = {"now": 0.0}
+    monkeypatch.setattr(wechat_module, "time", types.SimpleNamespace(
+        monotonic=lambda: clock["now"],
+        sleep=lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    ))
+    chat_page = [
+        UIElement(index=1, class_name="host.ocr.Text", text="Example Chat",
+                  bounds=(320, 104, 756, 157)),
+        UIElement(index=2, class_name="host.ocr.MessageInput",
+                  text="[WeChat message input]", bounds=(110, 2165, 720, 2325),
+                  clickable=True, focusable=True),
+    ]
+    send_page = [*chat_page, UIElement(index=3, class_name="host.ocr.Text", text="Send",
+                                       bounds=(933, 1422, 1035, 1466), clickable=True)]
+    reply_page = [*chat_page, UIElement(index=4, class_name="host.ocr.Text", text="hello",
+                                        bounds=(760, 1780, 1000, 1880))]
+    state = {"send_taps": 0, "sent_at": None}
+
+    class Backend:
+        def capture(self, mode):
+            clock["now"] += 0.5  # resident OCR helper
+            if state["sent_at"] is None:
+                elements = send_page
+            elif clock["now"] - state["sent_at"] >= 2.0:
+                elements = reply_page
+            else:
+                elements = send_page  # WeChat has not cleared the composer yet
+            return phone_tool.CaptureResult(mode=mode, width=1080, height=2400,
+                                            elements=elements, current_package="com.tencent.mm")
+
+        def tap(self, *, element=None, x=None, y=None):
+            if element == 3 or (x, y) == (984, 1444):
+                state["send_taps"] += 1
+                if state["sent_at"] is None:
+                    state["sent_at"] = clock["now"]
+            return phone_tool.ActionResult(ok=True, action="tap")
+
+        def set_text(self, text, element=None):
+            return phone_tool.ActionResult(ok=True, action="set_text")
+
+    backend = Backend()
+    opened = phone_tool.ActionResult(ok=True, action="wechat_open_chat",
+                                     capture=backend.capture("hierarchy"))
+    monkeypatch.setattr(wechat_module, "open_chat", lambda b, chat: opened)
+    monkeypatch.setattr(wechat_module, "_prepare_text_input",
+                        lambda b, capture: phone_tool.ActionResult(ok=True, action="tap", capture=capture))
+
+    result = wechat_module._reply_once(backend, "Example Chat", "hello")
+
+    assert state["send_taps"] == 1
+    assert result.ok and result.meta["delivery_status"] == "confirmed"

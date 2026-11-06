@@ -474,9 +474,12 @@ def _return_to_conversation_list(
 
 def _chat_is_open(capture: CaptureResult, chat: str) -> bool:
     return (
+        # Only WeChat's own page counts: another app (say, opened from a
+        # notification that copies the chat's name) must never receive a reply.
+        capture.current_package in ("", WECHAT_PACKAGE)
         # Search screens (FTSMainUI, web search MMFTSSOSHomeWebViewUI) have a
         # composer-like search box that echoes the chat title.
-        "fts" not in capture.current_activity.rsplit(".", 1)[-1].casefold()
+        and "fts" not in capture.current_activity.rsplit(".", 1)[-1].casefold()
         and not _is_search_page(capture)
         and _find_conversation_tab(capture) is None
         and _find_chat_header(capture, chat) is not None
@@ -1081,9 +1084,14 @@ def _open_from_notification_banner(backend: PhoneBackend, chat: str) -> Optional
     tapped = _run_and_capture(backend, "tap", lambda: backend.tap(x=x, y=y))
     if tapped.capture is None:
         return None
-    opened = _settle_capture(backend, tapped.capture, lambda value: _chat_is_open(value, chat),
+    # Any app can post a notification with the chat's name: accept the result
+    # only when the tap verifiably landed in WeChat itself.
+    def in_wechat_chat(value: CaptureResult) -> bool:
+        return value.current_package == WECHAT_PACKAGE and _chat_is_open(value, chat)
+
+    opened = _settle_capture(backend, tapped.capture, in_wechat_chat,
                              attempts=0, until=time.monotonic() + _LIST_TAP_REACTION_SECONDS)
-    if _chat_is_open(opened, chat):
+    if in_wechat_chat(opened):
         logger.info("WeChat opened %r from its notification banner", chat)
         return opened
     logger.info("WeChat banner tap did not open %r; navigating instead", chat)

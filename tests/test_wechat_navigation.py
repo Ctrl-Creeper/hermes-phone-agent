@@ -722,3 +722,40 @@ def test_banner_that_opens_another_chat_falls_back_to_navigation(monkeypatch, em
 
     assert result.ok
     assert inputs == [("tap", None), "launch", ("key", "BACK"), ("tap", 2)]
+
+
+def _look_alike():
+    """Another app's page copying the chat's title and a composer (worst case)."""
+    return CaptureResult(mode='hierarchy', width=1080, height=2400, current_package='com.example.lookalike',
+                         current_activity='.FakeChat', elements=list(_VISIBLE_CHAT.elements))
+
+
+def test_a_look_alike_app_is_never_an_open_wechat_chat():
+    assert wechat._chat_is_open(_VISIBLE_CHAT, 'Example Group')
+    assert not wechat._chat_is_open(_look_alike(), 'Example Group')
+
+
+def test_banner_that_opens_another_app_is_not_trusted(monkeypatch, emulator_clock):
+    # Any app can post "Example Group • now"; its tap opens that app.
+    screen, ocr = _banner_screen('Example Group•now')
+    monkeypatch.setattr(wechat, 'recognize_text', lambda png: ocr)
+    backend, inputs = _visible_chat_backend([_VISIBLE_LIST])
+    state = {"page": "fake"}
+    pages = {"fake": _look_alike(), "list": _VISIBLE_LIST, "chat": _VISIBLE_CHAT}
+    timed = emulator_clock(iter(lambda: pages[state["page"]], None))
+    backend.capture = lambda mode='hierarchy': screen if mode == 'screenshot' else timed(mode)
+    real_launch, real_tap = backend.launch_app, backend.tap
+    backend.launch_app = lambda package: (state.update(page="list"), real_launch(package))[1]
+    backend.tap = lambda **kw: (state.update(page="chat") if kw.get("element") == 2 else None, real_tap(**kw))[1]
+
+    result = wechat.open_visible_chat(backend, 'Example Group')
+
+    assert result.ok and result.capture.current_package == 'com.tencent.mm'
+    assert inputs == [("tap", None), "launch", ("tap", 2)]  # fell back to WeChat itself
+
+
+def test_reply_never_reuses_a_look_alike_app_as_the_open_chat(monkeypatch):
+    wechat.remember_open_chat('Example Group')
+    backend = type("B", (), {"capture": lambda self, mode='hierarchy': _look_alike()})()
+
+    assert wechat._reusable_open_chat(backend, 'Example Group') is None

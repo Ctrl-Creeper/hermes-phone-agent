@@ -1,12 +1,8 @@
 # hermes-phone-agent
 
-English | [中文](README_CN.md)
+English | [中文](README_CN.md) | **Downstreams:** [phone-mcp-server](https://github.com/Ctrl-Creeper/phone-mcp-server) · [Neko phone_workflows](https://github.com/Ctrl-Creeper/n.e.k.o_plugin_phone_workflows)
 
-> **Downstreams:** this repo is the shared source for two direct downstreams, which sync from it:
-> - [phone-mcp-server](https://github.com/Ctrl-Creeper/phone-mcp-server): standalone MCP/HTTP server for non-Hermes agents
-> - [Neko phone_workflows](https://github.com/Ctrl-Creeper/n.e.k.o_plugin_phone_workflows): N.E.K.O plugin
->
-> Changes to shared phone code or the Android helper must keep both in sync. See [DOWNSTREAMS.md](DOWNSTREAMS.md).
+> Both downstreams sync from this repo. Changes to shared phone code or the Android helper must keep them in sync. See [DOWNSTREAMS.md](DOWNSTREAMS.md).
 
 Two [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugins + one
 Android helper APK that let Hermes control and react to a virtual Android phone.

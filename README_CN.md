@@ -1,5 +1,11 @@
 # hermes-phone-agent
 
+> **下游项目：** 本仓库是两个直接下游的共享源，二者会从这里同步：
+> - [phone-mcp-server](https://github.com/Ctrl-Creeper/phone-mcp-server)：面向非 Hermes agent 的独立 MCP/HTTP 服务器
+> - [Neko phone_workflows](https://github.com/Ctrl-Creeper/n.e.k.o_plugin_phone_workflows)：N.E.K.O 插件
+>
+> 修改共享手机代码或 Android helper 时，必须同时保持两者同步。详见 [DOWNSTREAMS.md](DOWNSTREAMS.md)。
+
 语音上下文：调用 `wechat_collect_context` 时传入 `transcribe_voice: true`、
 `max_voice: 3`，可对明确识别的语音气泡使用微信内置“转文字”，返回
 `voice_transcripts` 给 agent 理解。不会播放、下载或发送音频。

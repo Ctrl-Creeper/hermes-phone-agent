@@ -429,6 +429,9 @@ Send the Home button:
 ```bash
 adb shell input keyevent 3
 ```
+
+## Friendly Link
+[linux do](linux.do)
 ## License
 
 AGPL-3.0 license
